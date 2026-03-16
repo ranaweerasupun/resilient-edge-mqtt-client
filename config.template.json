@@ -1,0 +1,31 @@
+{
+  "_comment": "Copy this file to config.json and fill in your values. config.json is gitignored so your credentials stay private.",
+
+  "client_id": "my_edge_device_001",
+  "broker_host": "localhost",
+  "broker_port": 1883,
+  "keepalive": 60,
+  "clean_session": false,
+
+  "username": null,
+  "password": null,
+  "use_tls": false,
+  "ca_certs": null,
+
+  "max_queue_size": 1000,
+  "queue_batch_size": 10,
+  "queue_drain_interval": 1.0,
+
+  "min_backoff": 1,
+  "max_backoff": 60,
+
+  "log_dir": "./logs",
+  "log_level": "INFO",
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5,
+
+  "db_path": "./mqtt_client.db",
+
+  "message_rate_limit": 100,
+  "max_inflight_messages": 20
+}
