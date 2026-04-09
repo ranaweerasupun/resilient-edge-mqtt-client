@@ -5,11 +5,12 @@ from production_client import ProductionMQTTClient
 
 def simulate_sensor_readings(client, duration_seconds=60):
     """
-    Simulate a sensor collecting data over time.
-    
-    This mimics a real edge device that continuously generates data
-    regardless of network conditions. Some readings are marked as
-    high priority (like alerts), while others are routine telemetry.
+    Simulate a sensor publishing temperature readings at a fixed interval.
+
+    Temperature alternates through a range to produce a mix of routine
+    readings and critical alerts, which lets you observe how the priority
+    system behaves when the queue fills up. Statistics are printed every
+    10 readings so queue depth and inflight count are visible in the terminal.
     """
     print(f"\n{'='*60}")
     print("SIMULATING EDGE SENSOR DEVICE")

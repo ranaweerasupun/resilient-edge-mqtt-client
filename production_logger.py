@@ -1,14 +1,11 @@
 # production_logger.py
 # -*- coding: utf-8 -*-
 """
-Production-grade logging for MQTT client.
+Logging for the production MQTT client.
 
-Features:
-- File-based logging with rotation
-- Multiple log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- Structured logging with context
-- Performance metrics logging
-- Thread-safe
+Wraps Python's standard logging with rotating file handlers, a structured
+key-value context format, and a separate JSON Lines metrics file for
+ingestion by monitoring tools (Prometheus, Loki, etc.).
 """
 
 import logging
@@ -20,8 +17,8 @@ import threading
 
 class ProductionLogger:
     """
-    Production-ready logger with file rotation and structured logging.
-    
+    Logger with file rotation, structured context, and metrics output.
+
     Usage:
         logger = ProductionLogger("mqtt_client", log_dir="/var/log/mqtt")
         logger.info("Connected to broker", broker="mqtt.example.com")
@@ -31,14 +28,11 @@ class ProductionLogger:
     def __init__(self, name, log_dir="./logs", log_level=logging.INFO, 
                  max_bytes=10*1024*1024, backup_count=5):
         """
-        Initialize logger.
-        
-        Args:
-            name: Logger name (appears in logs)
-            log_dir: Directory for log files
-            log_level: Minimum level to log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-            max_bytes: Maximum log file size before rotation (default 10MB)
-            backup_count: Number of backup files to keep (default 5)
+        Initialise the logger.
+
+        max_bytes controls when the log file rotates (default 10 MB).
+        backup_count is how many rotated files to keep before the oldest
+        is deleted (default 5, so up to 50 MB of log history).
         """
         self.name = name
         self.log_dir = log_dir
@@ -85,47 +79,43 @@ class ProductionLogger:
         self.metrics_file = os.path.join(log_dir, f"{name}_metrics.jsonl")
     
     def _log_with_context(self, level, message, **context):
-        """Log message with additional context as key-value pairs."""
-        # Build context string
+        """Format context kwargs as key=value pairs appended to the message."""
         if context:
             context_str = " | ".join(f"{k}={v}" for k, v in context.items())
             full_message = f"{message} | {context_str}"
         else:
             full_message = message
         
-        # Log at appropriate level
         self.logger.log(level, full_message)
     
     def debug(self, message, **context):
-        """Log debug message."""
+        """Log at DEBUG level."""
         self._log_with_context(logging.DEBUG, message, **context)
     
     def info(self, message, **context):
-        """Log info message."""
+        """Log at INFO level."""
         self._log_with_context(logging.INFO, message, **context)
     
     def warning(self, message, **context):
-        """Log warning message."""
+        """Log at WARNING level."""
         self._log_with_context(logging.WARNING, message, **context)
     
     def error(self, message, **context):
-        """Log error message."""
+        """Log at ERROR level."""
         self._log_with_context(logging.ERROR, message, **context)
     
     def critical(self, message, **context):
-        """Log critical message."""
+        """Log at CRITICAL level."""
         self._log_with_context(logging.CRITICAL, message, **context)
     
     def log_metric(self, metric_name, value, **tags):
         """
-        Log a metric to structured metrics file.
-        
-        Metrics are written as JSON lines for easy parsing by monitoring tools.
-        
-        Args:
-            metric_name: Name of the metric (e.g., "message_published")
-            value: Metric value (number)
-            **tags: Additional tags (e.g., topic="sensors/temp", qos=1)
+        Write a numeric metric to the structured metrics file.
+
+        Each metric is appended as a JSON line. Tags are arbitrary key-value
+        pairs attached to the measurement (e.g. topic, qos, queue_type).
+        The .jsonl format makes it straightforward to tail-pipe into a log
+        aggregator or parse with standard tools.
         """
         with self.lock:
             metric = {
@@ -140,13 +130,11 @@ class ProductionLogger:
     
     def log_event(self, event_type, **details):
         """
-        Log a structured event.
-        
-        Events are significant occurrences like connections, disconnections, errors.
-        
-        Args:
-            event_type: Type of event (e.g., "connection_established")
-            **details: Event details
+        Record a structured event to both the main log and the metrics file.
+
+        Use this for significant state transitions: connections, disconnections,
+        queue overflow, process startup, etc. Events are written as JSON lines
+        alongside metrics so they appear in the same timeline when analysing logs.
         """
         event = {
             'timestamp': datetime.now().isoformat(),
@@ -169,16 +157,12 @@ _logger_lock = threading.Lock()
 
 def get_logger(name="mqtt_client", **kwargs):
     """
-    Get or create global logger instance.
-    
-    This ensures all parts of the application use the same logger.
-    
-    Args:
-        name: Logger name
-        **kwargs: Passed to ProductionLogger constructor
-    
-    Returns:
-        ProductionLogger instance
+    Return the shared logger instance, creating it on first call.
+
+    All modules should obtain their logger through this function rather
+    than instantiating ProductionLogger directly. This ensures log output
+    from every part of the application goes through the same handlers and
+    into the same files.
     """
     global _global_logger
     

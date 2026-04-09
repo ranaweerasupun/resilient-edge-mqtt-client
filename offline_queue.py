@@ -1,40 +1,37 @@
 # -*- coding: utf-8 -*-
 import sqlite3
 import json
-import threading  # ← ADD THIS
+import threading
 from datetime import datetime
 from pathlib import Path
 
 class OfflineQueue:
     """
-    Manages messages that couldn't be published due to lack of connectivity.
-    
-    This is the first line of defense against message loss. When the device
-    is offline, messages accumulate here. When connectivity returns, they
-    drain from here into the normal publishing pipeline.
-    
-    Thread-safe version with proper locking.
+    Holds messages that couldn't be published due to loss of connectivity.
+
+    When the device goes offline, messages accumulate here. When the
+    connection returns, the queue drainer in ProductionMQTTClient pulls
+    them out in batches and feeds them back into the normal publish path.
+
+    Thread-safe: all database operations are serialised through a lock,
+    since the MQTT network thread and the application thread both write here.
     """
     
     def __init__(self, db_path="mqtt_client.db", max_size=1000):
         """
-        Initialize the offline queue.
-        
-        The max_size parameter is critical for edge devices with limited
-        storage. Setting it too low means losing data during outages.
-        Setting it too high risks filling up the disk. Choose based on:
-        - How frequently messages are generated
-        - How long outages typically last
-        - How much disk space is available
-        - The average message size
-        
-        For example: 1000 messages * 500 bytes each = ~500KB
-        If you generate 10 messages/minute, this holds ~100 minutes of data
+        Initialise the offline queue.
+
+        The max_size limit exists to protect devices with limited flash or SD
+        card storage. Choosing the right value depends on how frequently
+        messages are generated, how long outages typically last, and how much
+        disk space is available.
+
+        As a rough guide: 1000 messages at ~500 bytes each is around 500 KB.
+        At 10 messages per minute, that covers roughly 100 minutes of outage.
         """
         self.db_path = db_path
         self.max_size = max_size
         
-        # ADD THREADING LOCK
         self.lock = threading.Lock()
         
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -43,14 +40,14 @@ class OfflineQueue:
     
     def _create_tables(self):
         """
-        Create the offline queue table.
-        
-        Note the differences from the inflight table:
-        - id is auto-incrementing (messages don't have packet_id yet)
-        - priority field for smart queue management
-        - We track creation timestamp to implement time-based policies
+        Create the offline queue table and its indexes.
+
+        Unlike the inflight table, rows here use an auto-incrementing id
+        because messages don't have a packet_id until they're actually sent.
+        The priority and timestamp indexes are both used in the ordering
+        query inside get_next_batch.
         """
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS offline_queue (
@@ -64,13 +61,13 @@ class OfflineQueue:
                 )
             ''')
             
-            # Create an index on timestamp for efficient ordering
+            # Index for ordering by arrival time
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_timestamp 
                 ON offline_queue(timestamp)
             ''')
             
-            # Create an index on priority for efficient priority-based operations
+            # Compound index used by the priority-ordered fetch in get_next_batch
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_priority 
                 ON offline_queue(priority DESC, timestamp ASC)
@@ -81,14 +78,13 @@ class OfflineQueue:
     def add_message(self, topic, payload, qos, retain=False, priority=1):
         """
         Add a message to the offline queue.
-        
-        This is called when we try to publish but have no connection.
-        The message waits here until connectivity returns.
-        
-        Returns True if message was added, False if queue is full
-        and message was dropped according to the policy.
+
+        Called when publish() is attempted while disconnected. If the queue
+        is at capacity, the eviction policy in _make_room_for_message_unsafe
+        runs first. Returns True if the message was stored, False if it was
+        dropped because no room could be made.
         """
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             cursor = self.conn.cursor()
             
             # Check if queue is at capacity
@@ -119,27 +115,26 @@ class OfflineQueue:
     
     def _get_queue_size(self):
         """Return the current number of messages in the queue."""
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             return self._get_queue_size_unsafe()
     
     def _get_queue_size_unsafe(self):
-        """Internal method - assumes lock is already held."""
+        """Count rows without acquiring the lock. Caller must hold self.lock."""
         cursor = self.conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM offline_queue')
         return cursor.fetchone()[0]
     
     def _make_room_for_message_unsafe(self, new_message_priority):
         """
-        Internal method - assumes lock is already held.
-        
-        Try to make room in the queue for a new message.
-        
-        Strategy:
-        1. First, try to drop messages with priority lower than the new message
-        2. If no lower-priority messages exist, drop the oldest message
-        3. If the new message itself is lowest priority, drop it instead
-        
-        Returns True if room was made, False if new message should be dropped.
+        Attempt to free one slot in the queue. Caller must hold self.lock.
+
+        Eviction strategy:
+        1. Drop the lowest-priority message that is below the incoming priority.
+        2. If no such message exists, drop the oldest message regardless of priority.
+        3. If neither case applies (queue is somehow empty), return False.
+
+        Returns True if a slot was freed, False if the incoming message should
+        be dropped instead.
         """
         cursor = self.conn.cursor()
         
@@ -160,8 +155,7 @@ class OfflineQueue:
             print(f"📤 Dropped lower-priority message to make room")
             return True
         
-        # No lower-priority messages - check if we should drop oldest
-        # regardless of priority
+        # No lower-priority messages — fall back to dropping the oldest
         cursor.execute('''
             SELECT id, priority FROM offline_queue 
             ORDER BY timestamp ASC 
@@ -183,13 +177,13 @@ class OfflineQueue:
     def get_next_batch(self, batch_size=10):
         """
         Retrieve the next batch of messages to publish.
-        
-        We fetch in batches rather than one-at-a-time for efficiency.
-        Messages are ordered by priority (high to low), then by timestamp
-        (oldest first). This ensures important messages go first, and
-        within the same priority level, we maintain order.
+
+        Ordered by priority descending, then timestamp ascending — so high-
+        priority messages go first, and within the same priority level older
+        messages go before newer ones. The batch size keeps individual drain
+        iterations short and avoids holding the lock for too long.
         """
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT * FROM offline_queue 
@@ -215,26 +209,25 @@ class OfflineQueue:
     
     def remove_message(self, message_id):
         """
-        Remove a message from the queue after it's been successfully published.
-        
-        This is called after we've moved the message from the offline queue
-        into the normal publishing pipeline. The message might still be in
-        the inflight tracker waiting for acknowledgment, but it's no longer
-        "offline" - it's been sent.
+        Remove a message after it has been handed off to the publish pipeline.
+
+        At this point the message may still be in the inflight tracker waiting
+        for a broker acknowledgment, but it's no longer the queue's responsibility.
         """
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute('DELETE FROM offline_queue WHERE id = ?', (message_id,))
             self.conn.commit()
     
     def get_stats(self):
         """
-        Get statistics about the offline queue.
-        
-        Useful for monitoring and debugging. You can expose these stats
-        through your health monitoring system to track queue depth over time.
+        Return queue depth and age statistics.
+
+        Exposed via ProductionMQTTClient.get_statistics() for health checks
+        and monitoring. The capacity_used_percent field is particularly useful
+        for triggering alerts before the queue fills up entirely.
         """
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             cursor = self.conn.cursor()
             
             # Total count
@@ -271,7 +264,7 @@ class OfflineQueue:
     
     def clear(self):
         """Clear all messages from the queue. Use with caution!"""
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute('DELETE FROM offline_queue')
             self.conn.commit()
@@ -279,5 +272,5 @@ class OfflineQueue:
     
     def close(self):
         """Clean up database connection."""
-        with self.lock:  # ← ADD LOCK
+        with self.lock:
             self.conn.close()

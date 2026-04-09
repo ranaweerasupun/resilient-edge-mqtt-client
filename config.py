@@ -1,14 +1,11 @@
 # config.py
 # -*- coding: utf-8 -*-
 """
-Configuration management for production MQTT client.
+Configuration management for the production MQTT client.
 
-Supports:
-- Configuration files (JSON, YAML)
-- Environment variables
-- Command-line arguments
-- Validation
-- Defaults
+Supports loading from a JSON file, a simple key=value file, environment
+variables, or a plain dictionary. All sources are merged with the same
+precedence order and validated on load.
 """
 
 import os
@@ -18,21 +15,21 @@ from pathlib import Path
 
 class Config:
     """
-    Production configuration with validation and multiple sources.
-    
-    Configuration priority (highest to lowest):
+    Configuration loader and validator with support for multiple sources.
+
+    Precedence, highest to lowest:
     1. Command-line arguments
     2. Environment variables
     3. Configuration file
     4. Defaults
-    
+
     Usage:
         config = Config.from_file("config.json")
         broker_host = config.get("broker_host")
-        
+
         # Or with environment variables:
         config = Config.from_env()
-        
+
         # Or programmatically:
         config = Config({
             "broker_host": "mqtt.example.com",
@@ -91,10 +88,10 @@ class Config:
     
     def __init__(self, config_dict=None):
         """
-        Initialize configuration.
-        
-        Args:
-            config_dict: Dictionary of configuration values
+        Initialise with an optional dictionary of overrides.
+
+        Starts from DEFAULTS and applies config_dict on top. Call
+        from_file() or from_env() instead if loading from an external source.
         """
         self.config = {}
         
@@ -109,7 +106,7 @@ class Config:
         self._validate()
     
     def _validate(self):
-        """Validate configuration."""
+        """Validate configuration, raising ValueError on any constraint violation."""
         # Check required fields
         for field in self.REQUIRED:
             if not self.config.get(field):
@@ -131,45 +128,25 @@ class Config:
             raise ValueError(f"log_level must be one of {valid_log_levels}")
     
     def get(self, key, default=None):
-        """
-        Get configuration value.
-        
-        Args:
-            key: Configuration key
-            default: Default value if key not found
-        
-        Returns:
-            Configuration value
-        """
+        """Return the value for key, or default if not present."""
         return self.config.get(key, default)
     
     def set(self, key, value):
-        """
-        Set configuration value.
-        
-        Args:
-            key: Configuration key
-            value: Value to set
-        """
+        """Set a configuration value and re-run validation."""
         self.config[key] = value
         self._validate()
     
     def to_dict(self):
-        """Return configuration as dictionary."""
+        """Return a copy of the full configuration as a plain dictionary."""
         return self.config.copy()
     
     @classmethod
     def from_file(cls, file_path):
         """
-        Load configuration from file.
-        
-        Supports JSON and simple key=value format.
-        
-        Args:
-            file_path: Path to configuration file
-        
-        Returns:
-            Config instance
+        Load configuration from a file.
+
+        Accepts either JSON (.json extension) or a simple key=value format
+        for other extensions. Raises FileNotFoundError if the file doesn't exist.
         """
         file_path = Path(file_path)
         
@@ -205,15 +182,10 @@ class Config:
     def from_env(cls, prefix="MQTT_"):
         """
         Load configuration from environment variables.
-        
-        Environment variables should be prefixed (default: MQTT_).
-        Example: MQTT_BROKER_HOST, MQTT_CLIENT_ID
-        
-        Args:
-            prefix: Environment variable prefix
-        
-        Returns:
-            Config instance
+
+        Variables should be prefixed (default: MQTT_) and named after the
+        corresponding config key in uppercase, e.g. MQTT_BROKER_HOST maps
+        to broker_host. Type conversion follows the type of the default value.
         """
         config_dict = {}
         
@@ -237,10 +209,9 @@ class Config:
     
     def save_to_file(self, file_path):
         """
-        Save configuration to file.
-        
-        Args:
-            file_path: Path to save configuration
+        Write the current configuration to a file.
+
+        Uses JSON format for .json extensions, key=value for everything else.
         """
         file_path = Path(file_path)
         
@@ -253,7 +224,7 @@ class Config:
                     f.write(f"{key}={value}\n")
     
     def __str__(self):
-        """String representation (without sensitive data)."""
+        """String representation with the password field redacted."""
         safe_config = self.config.copy()
         if safe_config.get('password'):
             safe_config['password'] = '***REDACTED***'

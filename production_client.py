@@ -6,14 +6,14 @@ from offline_queue import OfflineQueue
 
 class ProductionMQTTClient:
     """
-    Production-ready MQTT client with offline queuing and inflight tracking.
-    
-    This client handles all the edge cases:
+    MQTT client with offline queuing and inflight tracking.
+
+    Handles the failure modes that standard MQTT clients leave to the caller:
     - Automatic reconnection with exponential backoff
-    - Offline message queuing when disconnected
-    - Inflight message tracking for reliable QoS 1/2 delivery
-    - Priority-based queue management
-    - Graceful degradation under constrained resources
+    - Offline message queuing when the broker is unreachable
+    - Inflight tracking to guarantee redelivery after reconnection for QoS 1/2
+    - Priority-based queue management when storage is constrained
+    - Graceful degradation under limited resources
     """
     
     def __init__(self, client_id, broker_host="localhost", broker_port=1883,
@@ -107,11 +107,11 @@ class ProductionMQTTClient:
     
     def _start_queue_drainer(self):
         """
-        Start background thread that drains the offline queue.
-        
-        This runs continuously while connected, pulling messages from
-        the offline queue and publishing them. It processes messages in
-        batches for efficiency.
+        Start the background thread that drains the offline queue.
+
+        Runs continuously while connected, pulling batches of messages from
+        the offline queue and publishing them. Stops itself on disconnection
+        and is restarted by _on_connect when the link comes back.
         """
         if self.queue_drainer_running:
             return
@@ -209,13 +209,14 @@ class ProductionMQTTClient:
     
     def publish(self, topic, payload, qos=0, retain=False, priority=1):
         """
-        Publish a message with intelligent routing.
-        
-        If connected: publish directly and track with inflight tracker for QoS 1/2
-        If disconnected: add to offline queue for later delivery
-        
-        The priority parameter (1-10, higher is more important) determines
-        which messages get dropped first if the offline queue fills up.
+        Publish a message, routing to the broker or the offline queue as appropriate.
+
+        If connected, the message is published directly. For QoS 1/2, it is
+        added to the inflight tracker until acknowledged. If disconnected, it
+        goes into the offline queue and will be delivered once connectivity returns.
+
+        The priority parameter (1–10, higher = more important) controls which
+        messages are evicted first if the offline queue reaches capacity.
         """
         with self.connection_lock:
             connected = self.is_connected
@@ -252,10 +253,11 @@ class ProductionMQTTClient:
     
     def get_statistics(self):
         """
-        Get comprehensive statistics about the client state.
-        
-        This is useful for monitoring and debugging. You'd typically
-        expose these through a health check endpoint or monitoring dashboard.
+        Return a snapshot of current client state.
+
+        Useful for health checks and monitoring dashboards. Covers connection
+        status, current backoff interval, offline queue depth, and the number
+        of messages awaiting broker acknowledgment.
         """
         queue_stats = self.offline_queue.get_stats()
         inflight_count = self.inflight_tracker.count_messages()

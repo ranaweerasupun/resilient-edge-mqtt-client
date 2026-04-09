@@ -1,22 +1,10 @@
-# Fixed inflight_tracker.py - Thread-Safe Version
-
 """
-Threading Issue Explanation:
-═══════════════════════════════════════════════════════════════════════════════
+inflight_tracker.py — tracks MQTT messages that have been sent but not yet acknowledged.
 
-THE PROBLEM:
-1. Main thread creates RobustMQTTClient
-2. RobustMQTTClient creates InflightTracker
-3. InflightTracker opens SQLite connection (in main thread)
-4. client.start() starts MQTT background thread
-5. Background thread calls _on_connect callback
-6. _on_connect tries to use SQLite connection from different thread
-7. SQLite raises: "SQLite objects created in a thread can only be used in that same thread"
-
-THE SOLUTION:
-Add check_same_thread=False to SQLite connection. This tells SQLite to allow
-the connection to be used from any thread. We add a threading lock to ensure
-only one thread accesses the database at a time.
+SQLite is used for persistence so that inflight state survives a process restart.
+The connection is opened with check_same_thread=False because the MQTT network
+thread and the main application thread both call into this class. A threading lock
+serialises access so only one thread touches the database at a time.
 """
 
 import sqlite3
@@ -25,30 +13,34 @@ from pathlib import Path
 
 class InflightTracker:
     """
-    Track inflight MQTT messages using SQLite database.
-    Thread-safe version with proper locking.
+    Track inflight MQTT messages using an SQLite-backed store.
+
+    A message is "inflight" from the moment it is handed to the broker until
+    the corresponding PUBACK (QoS 1) or PUBCOMP (QoS 2) is received. Storing
+    these in SQLite means they survive reconnections and process restarts, so
+    they can be re-sent rather than silently lost.
     """
     
     def __init__(self, db_path="inflight_messages.db"):
         self.db_path = db_path
         
-        # Create a lock to ensure thread-safe database access
-        # This prevents two threads from accessing the database simultaneously
+        # Serialises database access across the MQTT network thread and the
+        # main application thread.
         self.lock = threading.Lock()
         
-        # Open SQLite connection with check_same_thread=False
-        # This allows the connection to be used from any thread
-        # We use the lock above to ensure thread safety
+        # check_same_thread=False is required here because the connection is
+        # created in the main thread but used from the MQTT callback thread.
+        # The lock above ensures only one thread is in the database at a time.
         self.conn = sqlite3.connect(
             db_path,
-            check_same_thread=False  # ← THIS IS THE KEY FIX!
+            check_same_thread=False
         )
         
         self._create_table()
     
     def _create_table(self):
         """Create the inflight messages table if it doesn't exist."""
-        with self.lock:  # Acquire lock before database access
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS inflight_messages (
@@ -63,10 +55,10 @@ class InflightTracker:
             self.conn.commit()
     
     def add_message(self, packet_id, topic, payload, qos, retain):
-        """Add a message to the inflight tracker."""
+        """Store a message as inflight. Uses INSERT OR REPLACE in case of mid collision."""
         import time
         
-        with self.lock:  # Thread-safe access
+        with self.lock:
             cursor = self.conn.cursor()
             
             # Convert boolean retain to integer (SQLite doesn't have boolean)
@@ -83,8 +75,8 @@ class InflightTracker:
         print(f"Stored inflight message: packet_id={packet_id}, topic={topic}")
     
     def remove_message(self, packet_id):
-        """Remove a message from the inflight tracker (when acknowledged)."""
-        with self.lock:  # Thread-safe access
+        """Remove a message once the broker has acknowledged it."""
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute("DELETE FROM inflight_messages WHERE packet_id = ?", (packet_id,))
             self.conn.commit()
@@ -92,8 +84,13 @@ class InflightTracker:
         print(f"Removed inflight message: packet_id={packet_id}")
     
     def get_all_messages(self):
-        """Get all inflight messages."""
-        with self.lock:  # Thread-safe access
+        """
+        Return all stored inflight messages, ordered by timestamp.
+
+        Called on reconnection to get the list of messages that need to be
+        re-sent. Returns a list of dicts with keys matching the table columns.
+        """
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute("""
                 SELECT packet_id, topic, payload, qos, retain, timestamp
@@ -118,8 +115,8 @@ class InflightTracker:
             return messages
     
     def count_messages(self):
-        """Count how many messages are currently inflight."""
-        with self.lock:  # Thread-safe access
+        """Return the number of messages currently awaiting acknowledgment."""
+        with self.lock:
             cursor = self.conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM inflight_messages")
             count = cursor.fetchone()[0]
@@ -127,5 +124,5 @@ class InflightTracker:
     
     def close(self):
         """Close the database connection."""
-        with self.lock:  # Thread-safe access
+        with self.lock:
             self.conn.close()
