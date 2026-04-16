@@ -1,18 +1,20 @@
 # Production MQTT Client for Edge Devices
 
-An MQTT client library built for edge devices — Raspberry Pi, industrial gateways, field sensors — running in environments where network connectivity cannot be taken for granted. The design goal is zero message loss: messages are never silently dropped, whether the broker is reachable or not.
+An MQTT client built for devices that live in the real world — Raspberry Pis, industrial gateways, field sensors — where the network is unreliable and dropping a message silently is not acceptable.
 
 ---
 
-## Overview
+## The Reason for Designing This ...
 
-Standard MQTT clients assume the network is up. On an edge device that assumption breaks regularly — cellular links drop, Wi-Fi roams, VPNs time out. This library treats disconnection as a normal operating state rather than an exceptional one.
+Standard MQTT clients assume the network is up. On an edge device, that assumption breaks regularly. Cellular links drop, Wi-Fi roams, VPNs time out, brokers restart. Most client libraries handle this by... not handling it. They hand the problem back to your application code and wish you luck.
 
-When the broker is unreachable, outgoing messages are written to a local SQLite-backed queue and held there until connectivity returns. Messages that were already sent but not yet acknowledged are tracked separately so they can be re-sent after reconnection, closing the gap that most client libraries leave open.
+This library treats disconnection as a normal operating condition rather than an edge case. When the broker is unreachable, outgoing messages are written to a local SQLite queue and held there until the connection returns. Messages that were already sent but not yet acknowledged are tracked separately so they can be re-sent after reconnection — closing the gap that most libraries leave open.
+
+The goal is simple: if you call `publish()`, the message eventually arrives at the broker. Full stop.
 
 ---
 
-## Architecture
+## Code Structure
 
 ```
 Your Application
@@ -26,39 +28,23 @@ ProductionMQTTClient  (production_client.py)
 ProductionLogger     (production_logger.py)         — rotating file logs + structured metrics
 ```
 
----
-
-## Features
-
-**Reliable delivery** — QoS 1 and QoS 2 messages that haven't been acknowledged are held in the inflight tracker. On reconnect, they are re-sent automatically before the offline queue starts draining, so ordering and delivery guarantees are preserved.
-
-**Offline queuing** — Messages published while disconnected are written to SQLite and replayed in the background once the broker is reachable again. The queue drainer runs as a daemon thread and requires no application-level intervention.
-
-**Priority-based eviction** — Each message carries a priority from 1 to 10. When the queue reaches capacity, lower-priority messages are evicted first. Critical alerts can displace routine telemetry rather than being dropped because the queue was full of older, less important data.
-
-**Exponential backoff** — Reconnection intervals double on each failed attempt, bounded by a configurable minimum and maximum. This prevents large fleets from hammering a broker that's just come back online.
-
-**Thread-safe storage** — All SQLite operations in both the inflight tracker and the offline queue are guarded by threading locks. The MQTT network thread and the application thread can both touch the database without coordination at the call site.
-
-**Structured logging** — `production_logger.py` wraps Python's standard `logging` with rotating file handlers, a structured key-value context format, and a separate `.jsonl` metrics file suitable for ingestion by Prometheus, Loki, or similar tools.
-
-**Flexible configuration** — `config.py` loads from a JSON file, a simple `key=value` file, environment variables, or a plain dictionary. All values are validated at load time with clear error messages.
+The client is the only thing your application talks to directly. `InflightTracker` and `OfflineQueue` are internal — the client decides which one to use based on the current connection state. You don't have to think about either of them.
 
 ---
 
-## File Reference
+## Working Mechanism
 
-**`production_client.py`** — The main entry point. Instantiate `ProductionMQTTClient`, call `.connect()` and `.start()`, then use `.publish()` for all outgoing messages. The client decides internally whether to publish directly or queue offline based on current connection state.
+**Zero message loss** — Messages published while offline are written to SQLite and replayed automatically once the broker is reachable again. QoS 1/2 messages that were acknowledged by your app but not yet confirmed by the broker are tracked and re-sent after reconnection.
 
-**`inflight_tracker.py`** — SQLite-backed store for messages that have been handed to the broker but not yet acknowledged. Used internally by `ProductionMQTTClient`; no direct interaction required.
+**Priority-based eviction** — Each message carries a priority from 1 to 10. When the queue fills up, lower-priority messages are dropped first. A critical alert can displace routine telemetry rather than being blocked behind a full queue of sensor readings.
 
-**`offline_queue.py`** — SQLite-backed queue for messages waiting to be sent. Handles priority ordering, batch retrieval, and capacity management. Also used internally by `ProductionMQTTClient`.
+**Exponential backoff** — Reconnection intervals double on each failed attempt, up to a configurable ceiling. This matters in fleet deployments — you don't want hundreds of devices hammering a broker the moment it comes back online.
 
-**`config.py`** — The `Config` class. Load with `Config.from_file("config.json")`, `Config.from_env()`, or `Config({...})`. All supported fields and their defaults are listed in `Config.DEFAULTS`.
+**Thread-safe storage** — All SQLite operations are guarded by locks. The MQTT network thread and the application thread can both interact with the database without you having to coordinate anything at the call site.
 
-**`production_logger.py`** — The `ProductionLogger` class and `get_logger()` factory. Call `get_logger("my_app")` from any module to get the shared singleton instance.
+**Structured logging** — `production_logger.py` wraps Python's standard logging with rotating file handlers, a structured key-value format, and a separate `.jsonl` metrics file that works well with Prometheus, Loki, or similar tools.
 
-**`test_13.py`** — End-to-end simulation that publishes temperature readings every 5 seconds and prints queue statistics every 10 readings. Designed specifically to demonstrate offline behaviour: run it, stop the broker, watch messages accumulate, restart the broker, watch the queue drain.
+**Flexible configuration** — `config.py` can load from a JSON file, a simple `key=value` file, environment variables, or a plain dictionary. Everything is validated at load time with clear error messages.
 
 ---
 
@@ -68,11 +54,7 @@ ProductionLogger     (production_logger.py)         — rotating file logs + str
 pip install -r requirements.txt
 ```
 
-SQLite3 is part of the Python standard library and needs no separate installation.
-
----
-
-## Quick Start
+SQLite3 is part of the Python standard library, so no separate install needed there.
 
 ```python
 from production_client import ProductionMQTTClient
@@ -88,7 +70,7 @@ client = ProductionMQTTClient(
 client.connect()
 client.start()
 
-# Works whether connected or offline — routing is handled internally
+# Works whether the broker is reachable or not — routing is handled internally
 client.publish(
     topic="sensors/temperature",
     payload=json.dumps({"value": 23.5, "unit": "C"}),
@@ -104,18 +86,18 @@ print(stats)
 
 ## Configuration
 
-Copy the provided template and fill in your values:
+Copy the template and fill in your values:
 
 ```bash
 cp config.template.json config.json
 ```
 
-The file is gitignored so credentials stay out of version control. All fields have sensible defaults except `client_id`, which must be set explicitly.
+The file is gitignored so credentials stay out of version control. All fields have sensible defaults except `client_id`, which must be set explicitly because there's no safe default for a value that has to be unique across your entire fleet.
 
 | Field | Default | Description |
 |---|---|---|
-| `client_id` | *(required)* | Unique identifier for this MQTT client |
-| `broker_host` | `localhost` | MQTT broker hostname or IP address |
+| `client_id` | *(required)* | Unique identifier for this device |
+| `broker_host` | `localhost` | MQTT broker hostname or IP |
 | `broker_port` | `1883` | MQTT broker port |
 | `max_queue_size` | `1000` | Maximum offline queue depth |
 | `min_backoff` | `1` | Minimum reconnection wait in seconds |
@@ -124,14 +106,14 @@ The file is gitignored so credentials stay out of version control. All fields ha
 | `log_level` | `INFO` | One of: DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `db_path` | `./mqtt_client.db` | Path for the SQLite database files |
 
-Configuration can also be loaded from environment variables prefixed with `MQTT_`:
+You can also load configuration from environment variables prefixed with `MQTT_`:
 
 ```bash
 export MQTT_BROKER_HOST=mqtt.example.com
 export MQTT_CLIENT_ID=device_001
 ```
 
-Then call `Config.from_env()`.
+Then call `Config.from_env()` instead of `Config.from_file()`.
 
 ---
 
@@ -157,18 +139,18 @@ Log files rotate at `log_max_bytes` (default 10 MB) and keep up to `log_backup_c
 
 ---
 
-## Testing the Offline Queue
+## Testing the offline queue
 
-The quickest way to see the full system in action is against a local Mosquitto broker:
+The quickest way to see the system in action is against a local Mosquitto broker:
 
 ```bash
 # Terminal 1 — run the simulation
 python test_13.py
 
-# Terminal 2 — simulate a network outage
+# Terminal 2 — simulate an outage
 sudo systemctl stop mosquitto
 
-# Watch messages queue up in Terminal 1, then restore connectivity
+# Watch messages queue up in Terminal 1, then bring it back
 sudo systemctl start mosquitto
 
 # Watch the offline queue drain automatically
@@ -176,18 +158,34 @@ sudo systemctl start mosquitto
 
 ---
 
-## Project Structure
+## File reference
+
+`production_client.py` — The main entry point. Instantiate `ProductionMQTTClient`, call `.connect()` and `.start()`, then use `.publish()` for all outgoing messages. The client decides internally whether to send directly or queue offline.
+
+`inflight_tracker.py` — SQLite-backed store for messages that have been handed to the broker but not yet acknowledged. Used internally by `ProductionMQTTClient`; your code doesn't need to touch this directly.
+
+`offline_queue.py` — SQLite-backed queue for messages waiting to be sent. Handles priority ordering, batch retrieval, and capacity management. Also internal.
+
+`config.py` — The `Config` class. Load with `Config.from_file("config.json")`, `Config.from_env()`, or `Config({...})`. All supported fields and their defaults are listed in `Config.DEFAULTS`.
+
+`production_logger.py` — The `ProductionLogger` class and `get_logger()` factory. Call `get_logger("my_app")` from any module to get the shared singleton instance.
+
+`test_13.py` — End-to-end simulation that publishes temperature readings every 5 seconds and prints queue statistics every 10 readings. Specifically designed to demonstrate offline behaviour.
+
+---
+
+## Project structure
 
 ```
 .
-├── production_client.py      # Main MQTT client with offline + inflight support
-├── production_logger.py      # Rotating file logger and metrics writer
+├── production_client.py      # Main client
+├── production_logger.py      # Rotating logger and metrics writer
 ├── config.py                 # Configuration loader and validator
-├── inflight_tracker.py       # SQLite-backed inflight message tracker
-├── offline_queue.py          # SQLite-backed offline message queue
-├── test_13.py                # End-to-end simulation script
-├── config.template.json      # Configuration template (copy to config.json)
-├── requirements.txt          # Python dependencies
+├── inflight_tracker.py       # SQLite-backed inflight tracker
+├── offline_queue.py          # SQLite-backed offline queue
+├── test_13.py                # End-to-end simulation
+├── config.template.json      # Copy this to config.json
+├── requirements.txt
 ├── README.md
 └── LICENSE
 ```
@@ -198,8 +196,26 @@ sudo systemctl start mosquitto
 
 - Python 3.7 or later
 - `paho-mqtt`
-- An MQTT broker (e.g., [Eclipse Mosquitto](https://mosquitto.org/))
-- SQLite3 (included in Python standard library)
+- An MQTT broker (Mosquitto works well for local development)
+- SQLite3 (included in the standard library)
+
+---
+
+## Changelog
+
+### v0.3.0 — Data Integrity
+
+Two silent data-loss bugs were fixed in this release, plus a race condition that could cause a message to vanish without a trace.
+
+**Payload encoding in `InflightTracker`** — The old schema stored message payloads as `TEXT` using Python's `str()`. This looks harmless when the payload is a plain string, but if the payload is `bytes` — which is common for binary sensor data or anything serialised with protobuf — `str(b'\x00\x01')` produces the literal string `"b'\\x00\\x01'"` rather than the actual bytes. The broker receives garbage. The fix is to store payloads as `BLOB` and encode strings to UTF-8 explicitly before storing. On first startup after upgrading, `InflightTracker` detects the old schema and migrates automatically. The old corrupted rows are dropped — they weren't recoverable anyway.
+
+**Resent messages disappearing after a second disconnect** — When the client reconnects, it resends any messages that were inflight during the previous session. The problem was that paho assigns a brand-new packet ID (`mid`) each time a message is published, including resends. The old code called `client.publish()` but never updated the tracker with the new `mid`, so the tracker still held the stale ID from the previous connection. If the broker disconnected again before sending its acknowledgment, the tracker would have no entry for the new `mid` and the message would be quietly abandoned. The fix is to remove the old tracker entry immediately after republishing and insert a new one with the fresh `mid`.
+
+**Race condition in `publish()`** — Between checking `is_connected` and calling `client.publish()`, the connection can drop. In that narrow window, the message was neither sent nor queued — it simply disappeared. The fix wraps `client.publish()` in a try/except: if the send raises because the socket is already dead, the exception is caught, `is_connected` is set to `False`, and the message is routed to the offline queue as a fallback.
+
+### v0.2.0
+
+Initial release with offline queuing, inflight tracking, exponential backoff, priority-based eviction, structured logging, and flexible configuration.
 
 ---
 
