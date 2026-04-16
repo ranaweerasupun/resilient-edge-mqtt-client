@@ -104,6 +104,15 @@ class ProductionMQTTClient:
                 retain=msg['retain']
             )
             print(f"  ⟳ Resent: {msg['topic']}")
+            
+        if msg["qos"] > 0:
+                self.inflight_tracker.add_message(
+                    packet_id=info.mid,
+                    topic=msg["topic"],
+                    payload=msg["payload"],
+                    qos=msg["qos"],
+                    retain=msg["retain"],
+                )
     
     def _start_queue_drainer(self):
         """
