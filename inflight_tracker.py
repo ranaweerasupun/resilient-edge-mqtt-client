@@ -83,6 +83,20 @@ class InflightTracker:
                 )
             """)
             self.conn.commit()
+
+    @staticmethod
+    def _to_bytes(payload):
+        """
+        Ensure payload is bytes before storing.
+
+        MQTT payloads are bytes on the wire. If the caller passed a string
+        (e.g. a JSON string), encode it to UTF-8. If it's already bytes,
+        leave it alone. This means we never call str() on the payload —
+        which is exactly the bug this class used to have.
+        """
+        if isinstance(payload, bytes):
+            return payload
+        return payload.encode("utf-8")
     
     def add_message(self, packet_id, topic, payload, qos, retain):
         """Store a message as inflight. Uses INSERT OR REPLACE in case of mid collision."""
