@@ -37,6 +37,36 @@ class InflightTracker:
         )
         
         self._create_table()
+
+    def _migrate_schema(self):
+        """
+        Detect and remove the old TEXT-based schema from v0.2.0 and earlier.
+
+        The old schema stored payload as TEXT using str(payload), which corrupts
+        binary data (e.g. bytes b'\\x00\\x01' becomes the string "b'\\x00\\x01'").
+        Any rows stored under the old schema are already corrupted, so the
+        cleanest fix is to drop the table entirely and let _create_table()
+        rebuild it with the correct BLOB column.
+
+        SQLite does not support ALTER COLUMN, which is why we drop and recreate
+        rather than trying to alter the existing table in place.
+        """
+        with self.lock:
+            cursor = self.conn.cursor()
+
+            # PRAGMA table_info returns one row per column: (cid, name, type, ...)
+            cursor.execute("PRAGMA table_info(inflight_messages)")
+            columns = {row[1]: row[2].upper() for row in cursor.fetchall()}
+
+            # If the table exists and payload is TEXT, we need to migrate.
+            if "payload" in columns and columns["payload"] == "TEXT":
+                print(
+                    "InflightTracker: detected old TEXT-based schema — "
+                    "dropping table and rebuilding as BLOB. "
+                    "Stored inflight messages were corrupted and cannot be recovered."
+                )
+                cursor.execute("DROP TABLE inflight_messages")
+                self.conn.commit()
     
     def _create_table(self):
         """Create the inflight messages table if it doesn't exist."""
@@ -46,7 +76,7 @@ class InflightTracker:
                 CREATE TABLE IF NOT EXISTS inflight_messages (
                     packet_id INTEGER PRIMARY KEY,
                     topic TEXT NOT NULL,
-                    payload TEXT NOT NULL,
+                    payload   BLOB    NOT NULL,  -- raw bytes; never str(payload)
                     qos INTEGER NOT NULL,
                     retain INTEGER NOT NULL,
                     timestamp INTEGER NOT NULL
