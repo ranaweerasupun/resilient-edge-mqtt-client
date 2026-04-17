@@ -9,13 +9,13 @@ v0.4.0: Accepts a shared SQLite connection and lock from ProductionMQTTClient,
         file rather than two separate ones. Falls back to opening its own
         connection if used in standalone mode (backward compatible).
         All print() calls replaced with structured logger output.
-        
+
 """
 
 import sqlite3
 import threading
 import time
-
+from production_logger import get_logger
 
 class InflightTracker:
     """
@@ -27,17 +27,24 @@ class InflightTracker:
     they can be re-sent rather than silently lost.
     """
 
-    def __init__(self, db_path="inflight_messages.db"):
-        self.db_path = db_path
+    def __init__(self, db_path="inflight_messages.db", conn=None, lock=None):
+        """
+        Initialise the inflight tracker.
 
-        # Serialises database access across the MQTT network thread and the
-        # main application thread.
-        self.lock = threading.Lock()
+        """
+        
+        self.logger = get_logger()
 
-        # check_same_thread=False is required here because the connection is
-        # created in the main thread but used from the MQTT callback thread.
-        # The lock above ensures only one thread is in the database at a time.
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        if conn is not None:
+            # Shared mode — ProductionMQTTClient owns the connection lifecycle.
+            self.conn = conn
+            self.lock = lock
+            self._owns_connection = False
+        else:
+            # Standalone mode — we own the connection and must close it.
+            self.conn = sqlite3.connect(db_path, check_same_thread=False)
+            self.lock = threading.Lock()
+            self._owns_connection = True
 
         self._migrate_schema()
         self._create_table()
