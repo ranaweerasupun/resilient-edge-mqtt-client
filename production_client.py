@@ -1,74 +1,188 @@
 """
 production_client.py — MQTT client with offline queuing and inflight tracking.
 
-Handles the failure modes that standard MQTT clients leave to the caller:
-  - Automatic reconnection with exponential backoff
-  - Offline message queuing when the broker is unreachable
-  - Inflight tracking to guarantee redelivery after reconnection for QoS 1/2
-  - Priority-based queue management when storage is constrained
-  - Graceful degradation under limited resources
+v0.3.0: Fixed payload encoding corruption, resend-tracking gap, and the
+        publish() race condition. See v0.3.0 release notes for details.
 
-v0.3.0 changes:
-  - _resend_inflight_messages() now removes stale tracker entries and inserts
-    fresh ones with the new packet IDs assigned by paho after resend. Previously,
-    a second disconnection before acknowledgment would silently lose those messages
-    because the tracker no longer held a valid entry for them.
-  - publish() now wraps client.publish() in a try/except. If the connection drops
-    in the narrow window between the is_connected check and the actual send, the
-    exception is caught and the message is routed to the offline queue instead of
-    being silently discarded.
+v0.4.0: Internal consistency overhaul.
+        - Both storage systems (InflightTracker, OfflineQueue) now share a
+          single SQLite connection and a single lock. One database file
+          instead of two.
+        - Config integration: from_config() factory method reads all settings
+          from a Config object. Direct constructor still works (backward compat).
+        - Logger integration: all print() calls replaced with structured
+          logger output via ProductionLogger. The logger is initialised first
+          in __init__ so it is available throughout the object lifecycle.
+        - New constructor parameters: db_path, min_backoff, max_backoff,
+          log_dir, log_level. These were previously hardcoded.
 """
 
-import paho.mqtt.client as mqtt
-import time
+import sqlite3
+import logging
 import threading
+import time
+
+import paho.mqtt.client as mqtt
+
+from config import Config
 from inflight_tracker import InflightTracker
 from offline_queue import OfflineQueue
+from production_logger import get_logger
+
+
+# Maps the string log-level names used in Config to Python's logging constants.
+# Kept at module level so from_config() and __init__ can both use it.
+_LOG_LEVEL_MAP = {
+    "DEBUG":    logging.DEBUG,
+    "INFO":     logging.INFO,
+    "WARNING":  logging.WARNING,
+    "ERROR":    logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
 
 
 class ProductionMQTTClient:
     """
     MQTT client with offline queuing and inflight tracking.
 
-    Handles the failure modes that standard MQTT clients leave to the caller:
-    - Automatic reconnection with exponential backoff
-    - Offline message queuing when the broker is unreachable
-    - Inflight tracking to guarantee redelivery after reconnection for QoS 1/2
-    - Priority-based queue management when storage is constrained
-    - Graceful degradation under limited resources
+    The recommended way to create an instance is via the from_config()
+    class method, which reads all settings from a Config object:
+
+        config = Config.from_file("config.json")
+        client = ProductionMQTTClient.from_config(config)
+        client.connect()
+        client.start()
+
+    The direct constructor is still available for cases where a Config
+    object is not appropriate (e.g. unit tests, embedded usage).
     """
 
-    def __init__(self, client_id, broker_host="localhost", broker_port=1883,
-                 max_queue_size=1000):
+    def __init__(
+        self,
+        client_id,
+        broker_host="localhost",
+        broker_port=1883,
+        max_queue_size=1000,
+        db_path="./mqtt_client.db",
+        min_backoff=1,
+        max_backoff=60,
+        log_dir="./logs",
+        log_level="INFO",
+    ):
+        """
+        Initialise the client.
+
+        Initialisation order matters here. The logger must be set up first
+        because every subsequent step may need to log something (including
+        the SQLite schema migration that runs inside InflightTracker and
+        OfflineQueue). The shared database connection is created second,
+        before the two storage systems that depend on it.
+        """
         self.client_id = client_id
         self.broker_host = broker_host
         self.broker_port = broker_port
 
-        # Connection state tracking
+        # ----------------------------------------------------------------
+        # Step 1: Logger — must come first so everything below can log
+        # ----------------------------------------------------------------
+        log_level_int = _LOG_LEVEL_MAP.get(log_level.upper(), logging.INFO)
+        self.logger = get_logger(
+            "mqtt_client",
+            log_dir=log_dir,
+            log_level=log_level_int,
+        )
+
+        # ----------------------------------------------------------------
+        # Step 2: Shared database connection and lock
+        #
+        # A single SQLite file holds both the inflight_messages table and
+        # the offline_queue table. A single lock serialises all access to
+        # that file, so InflightTracker and OfflineQueue can never step on
+        # each other even though they share a connection.
+        # ----------------------------------------------------------------
+        self._db_conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._db_lock = threading.Lock()
+
+        self.logger.info("Database opened", path=db_path)
+
+        # ----------------------------------------------------------------
+        # Step 3: Storage systems — both receive the shared connection
+        # ----------------------------------------------------------------
+        self.inflight_tracker = InflightTracker(
+            conn=self._db_conn,
+            lock=self._db_lock,
+        )
+        self.offline_queue = OfflineQueue(
+            conn=self._db_conn,
+            lock=self._db_lock,
+            max_size=max_queue_size,
+        )
+
+        # ----------------------------------------------------------------
+        # Step 4: Connection state
+        # ----------------------------------------------------------------
         self.is_connected = False
         self.connection_lock = threading.Lock()
 
-        # Reconnection backoff parameters
-        self.min_backoff = 1
-        self.max_backoff = 60
+        # Reconnection backoff — now configurable rather than hardcoded
+        self.min_backoff = min_backoff
+        self.max_backoff = max_backoff
         self.current_backoff = self.min_backoff
         self.reconnect_in_progress = False
 
-        # Initialize storage systems
-        self.inflight_tracker = InflightTracker()
-        self.offline_queue = OfflineQueue(max_size=max_queue_size)
-
-        # Create MQTT client
+        # ----------------------------------------------------------------
+        # Step 5: MQTT client and callbacks
+        # ----------------------------------------------------------------
         self.client = mqtt.Client(client_id=client_id, clean_session=False)
-
-        # Set up callbacks
-        self.client.on_connect = self._on_connect
+        self.client.on_connect    = self._on_connect
         self.client.on_disconnect = self._on_disconnect
-        self.client.on_publish = self._on_publish
+        self.client.on_publish    = self._on_publish
 
-        # Background thread for draining offline queue
+        # Background thread for draining the offline queue
         self.queue_drainer_running = False
-        self.queue_drainer_thread = None
+        self.queue_drainer_thread  = None
+
+        self.logger.info(
+            "Client initialised",
+            client_id=client_id,
+            broker=f"{broker_host}:{broker_port}",
+            max_queue_size=max_queue_size,
+        )
+
+    # ------------------------------------------------------------------
+    # Factory method — the recommended way to create an instance
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a ProductionMQTTClient from a Config object.
+
+        This is the recommended instantiation path in production. It maps
+        every relevant Config field to the corresponding constructor parameter,
+        so you don't have to pass a long list of arguments at the call site:
+
+            config = Config.from_file("config.json")
+            client = ProductionMQTTClient.from_config(config)
+
+        All configuration sources that Config supports — JSON file, key=value
+        file, environment variables, or a plain dict — work transparently here.
+        """
+        return cls(
+            client_id     = config.get("client_id"),
+            broker_host   = config.get("broker_host"),
+            broker_port   = config.get("broker_port"),
+            max_queue_size= config.get("max_queue_size"),
+            db_path       = config.get("db_path"),
+            min_backoff   = config.get("min_backoff"),
+            max_backoff   = config.get("max_backoff"),
+            log_dir       = config.get("log_dir"),
+            log_level     = config.get("log_level"),
+        )
+
+    # ------------------------------------------------------------------
+    # MQTT callbacks
+    # ------------------------------------------------------------------
 
     def _on_connect(self, client, userdata, flags, rc):
         """Handle successful connection."""
@@ -76,19 +190,30 @@ class ProductionMQTTClient:
             with self.connection_lock:
                 self.is_connected = True
 
-            print(f"✓ Connected to broker (session_present={flags.get('session present', False)})")
+            session_present = flags.get("session present", False)
+            self.logger.info(
+                "Connected to broker",
+                broker=f"{self.broker_host}:{self.broker_port}",
+                session_present=session_present,
+            )
+            self.logger.log_event(
+                "connection_established",
+                broker=self.broker_host,
+                port=self.broker_port,
+                session_present=session_present,
+            )
 
             # Reset backoff on successful connection
             self.current_backoff = self.min_backoff
             self.reconnect_in_progress = False
 
-            # First, resend any inflight messages from previous connection
+            # Resend inflight messages first, then drain the offline queue.
+            # Order matters: inflight messages were already accepted by a
+            # previous broker session and should be delivered before new ones.
             self._resend_inflight_messages()
-
-            # Then, start draining the offline queue
             self._start_queue_drainer()
         else:
-            print(f"✗ Connection failed with code {rc}")
+            self.logger.error("Connection refused by broker", return_code=rc)
 
     def _on_disconnect(self, client, userdata, rc):
         """Handle disconnection."""
@@ -98,50 +223,50 @@ class ProductionMQTTClient:
         self._stop_queue_drainer()
 
         if rc == 0:
-            print("Disconnected cleanly from broker")
+            self.logger.info("Disconnected cleanly from broker")
+            self.logger.log_event("disconnection_clean")
         else:
-            print(f"✗ Unexpected disconnection (code {rc})")
+            self.logger.warning("Unexpected disconnection", return_code=rc)
+            self.logger.log_event("disconnection_unexpected", return_code=rc)
             self._reconnect_with_backoff()
 
     def _on_publish(self, client, userdata, mid):
-        """Handle message acknowledgment."""
-        print(f"✓ Message {mid} acknowledged by broker")
+        """Handle message acknowledgment from the broker."""
+        self.logger.debug("Message acknowledged by broker", mid=mid)
         self.inflight_tracker.remove_message(mid)
+
+    # ------------------------------------------------------------------
+    # Inflight resend
+    # ------------------------------------------------------------------
 
     def _resend_inflight_messages(self):
         """
         Resend messages that were inflight during the previous connection.
 
-        Each message gets a brand-new packet ID (mid) from paho when it is
-        republished. We remove the stale tracker entry that used the old mid
-        and immediately insert a fresh entry with the new mid. Without this
-        step, a second disconnection before the broker sends its acknowledgment
-        would leave those messages with no tracker entry, so they would never
-        be resent again — a silent loss.
-
-        This is the v0.3.0 fix for the resend-tracking gap.
+        Each message gets a new packet ID (mid) from paho on resend. We
+        remove the stale tracker entry and insert a fresh one with the new
+        mid. See the v0.3.0 release notes for a full explanation of why
+        this step is necessary.
         """
         messages = self.inflight_tracker.get_all_messages()
 
         if not messages:
             return
 
-        print(f"⟳ Resending {len(messages)} inflight messages...")
+        self.logger.info("Resending inflight messages", count=len(messages))
 
         for msg in messages:
             info = self.client.publish(
                 topic=msg["topic"],
-                payload=msg["payload"],   # already bytes — no encoding needed
+                payload=msg["payload"],   # bytes — no re-encoding needed
                 qos=msg["qos"],
                 retain=msg["retain"],
             )
 
-            # Remove the old tracker entry (keyed on the previous connection's mid).
+            # Remove the stale entry (old mid from previous connection)
             self.inflight_tracker.remove_message(msg["packet_id"])
 
             # Re-register under the new mid so _on_publish() can clean it up
-            # correctly when the broker acknowledges this resent copy.
-            # Only QoS 1/2 messages receive acknowledgments; QoS 0 does not.
             if msg["qos"] > 0:
                 self.inflight_tracker.add_message(
                     packet_id=info.mid,
@@ -151,7 +276,16 @@ class ProductionMQTTClient:
                     retain=msg["retain"],
                 )
 
-            print(f"  ⟳ Resent: {msg['topic']} (old_mid={msg['packet_id']}, new_mid={info.mid})")
+            self.logger.debug(
+                "Inflight message resent",
+                topic=msg["topic"],
+                old_mid=msg["packet_id"],
+                new_mid=info.mid,
+            )
+
+    # ------------------------------------------------------------------
+    # Queue drainer
+    # ------------------------------------------------------------------
 
     def _start_queue_drainer(self):
         """
@@ -167,7 +301,7 @@ class ProductionMQTTClient:
         self.queue_drainer_running = True
 
         def drain_queue():
-            print("🔄 Queue drainer started")
+            self.logger.info("Queue drainer started")
 
             while self.queue_drainer_running and self.is_connected:
                 messages = self.offline_queue.get_next_batch(batch_size=10)
@@ -176,11 +310,14 @@ class ProductionMQTTClient:
                     time.sleep(1)
                     continue
 
-                print(f"📤 Draining {len(messages)} messages from offline queue...")
+                self.logger.info(
+                    "Draining messages from offline queue",
+                    count=len(messages),
+                )
 
                 for msg in messages:
                     if not self.is_connected:
-                        print("⚠ Connection lost during queue drain")
+                        self.logger.warning("Connection lost during queue drain")
                         break
 
                     info = self.client.publish(
@@ -200,19 +337,30 @@ class ProductionMQTTClient:
                         )
 
                     self.offline_queue.remove_message(msg["id"])
-                    print(f"  📤 Published: {msg['topic']}")
+                    self.logger.debug(
+                        "Drained message from offline queue",
+                        topic=msg["topic"],
+                        priority=msg["priority"],
+                    )
                     time.sleep(0.1)
 
-            print("🔄 Queue drainer stopped")
+            self.logger.info("Queue drainer stopped")
 
-        self.queue_drainer_thread = threading.Thread(target=drain_queue, daemon=True)
+        self.queue_drainer_thread = threading.Thread(
+            target=drain_queue,
+            daemon=True,
+        )
         self.queue_drainer_thread.start()
 
     def _stop_queue_drainer(self):
-        """Stop the queue drainer thread."""
+        """Signal the queue drainer to stop and wait briefly for it to exit."""
         self.queue_drainer_running = False
         if self.queue_drainer_thread:
             self.queue_drainer_thread.join(timeout=2)
+
+    # ------------------------------------------------------------------
+    # Reconnection
+    # ------------------------------------------------------------------
 
     def _reconnect_with_backoff(self):
         """Attempt to reconnect with exponential backoff."""
@@ -223,27 +371,40 @@ class ProductionMQTTClient:
 
         def reconnect_thread():
             while self.reconnect_in_progress:
-                print(f"⟳ Waiting {self.current_backoff}s before reconnection attempt...")
+                self.logger.info(
+                    "Waiting before reconnection attempt",
+                    backoff_seconds=self.current_backoff,
+                )
                 time.sleep(self.current_backoff)
 
                 try:
-                    print("⟳ Attempting to reconnect...")
+                    self.logger.info("Attempting to reconnect")
                     self.client.reconnect()
                     break
                 except Exception as e:
-                    print(f"✗ Reconnection failed: {e}")
-                    self.current_backoff = min(self.current_backoff * 2, self.max_backoff)
+                    self.logger.error("Reconnection attempt failed", error=str(e))
+                    self.current_backoff = min(
+                        self.current_backoff * 2,
+                        self.max_backoff,
+                    )
 
         thread = threading.Thread(target=reconnect_thread, daemon=True)
         thread.start()
 
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
     def connect(self):
-        """Establish initial connection to the broker."""
-        print(f"Connecting to {self.broker_host}:{self.broker_port}...")
+        """Establish the initial connection to the broker."""
+        self.logger.info(
+            "Connecting to broker",
+            broker=f"{self.broker_host}:{self.broker_port}",
+        )
         try:
             self.client.connect(self.broker_host, self.broker_port, keepalive=60)
         except Exception as e:
-            print(f"Initial connection failed: {e}")
+            self.logger.error("Initial connection failed", error=str(e))
             self._reconnect_with_backoff()
 
     def publish(self, topic, payload, qos=0, retain=False, priority=1):
@@ -251,15 +412,12 @@ class ProductionMQTTClient:
         Publish a message, routing to the broker or the offline queue as appropriate.
 
         If connected, the message is published directly. For QoS 1/2, it is
-        added to the inflight tracker until acknowledged. If disconnected, it
-        goes into the offline queue and will be delivered once connectivity returns.
+        added to the inflight tracker until acknowledged. If disconnected (or
+        if the send fails mid-flight due to a race condition), the message is
+        written to the offline queue and delivered once connectivity returns.
 
-        v0.3.0: The actual client.publish() call is now wrapped in a try/except.
-        The problem it solves is a race condition: between checking is_connected
-        and calling client.publish(), the connection can drop. Without the try/except,
-        that message would be neither published nor queued — silently lost. Now,
-        if publish raises (because the socket is dead), we catch it, mark ourselves
-        as disconnected, and route the message to the offline queue instead.
+        The priority parameter (1–10, higher = more important) controls eviction
+        order when the offline queue reaches capacity.
         """
         with self.connection_lock:
             connected = self.is_connected
@@ -268,7 +426,6 @@ class ProductionMQTTClient:
             try:
                 info = self.client.publish(topic, payload, qos, retain)
 
-                # Track for QoS 1/2 — these need acknowledgment from the broker.
                 if qos > 0:
                     self.inflight_tracker.add_message(
                         packet_id=info.mid,
@@ -278,17 +435,26 @@ class ProductionMQTTClient:
                         retain=retain,
                     )
 
+                self.logger.debug(
+                    "Message published to broker",
+                    topic=topic,
+                    qos=qos,
+                    mid=info.mid,
+                )
                 return info
 
             except Exception as e:
-                # The connection dropped in the window between our check above
-                # and the actual send. Update our state and fall through to the
-                # offline queue so the message is not lost.
-                print(f"⚠ publish() failed mid-flight ({e}) — routing to offline queue")
+                # The connection dropped in the window between the check above
+                # and the actual send. Update state and fall through to queue.
+                self.logger.warning(
+                    "Publish failed mid-flight — routing to offline queue",
+                    topic=topic,
+                    error=str(e),
+                )
                 with self.connection_lock:
                     self.is_connected = False
 
-        # Either we were already disconnected, or the send above just failed.
+        # Either already disconnected or the send above just failed.
         success = self.offline_queue.add_message(
             topic=topic,
             payload=payload,
@@ -298,7 +464,11 @@ class ProductionMQTTClient:
         )
 
         if not success:
-            print(f"⚠ Failed to queue message — queue full and couldn't make room")
+            self.logger.error(
+                "Message dropped — queue full and could not make room",
+                topic=topic,
+                priority=priority,
+            )
 
         return None
 
@@ -306,28 +476,35 @@ class ProductionMQTTClient:
         """
         Return a snapshot of current client state.
 
-        Useful for health checks and monitoring dashboards. Covers connection
-        status, current backoff interval, offline queue depth, and the number
-        of messages awaiting broker acknowledgment.
+        Useful for health checks and monitoring dashboards.
         """
-        queue_stats = self.offline_queue.get_stats()
-        inflight_count = self.inflight_tracker.count_messages()
-
         return {
-            "connected": self.is_connected,
+            "connected":              self.is_connected,
             "current_backoff_seconds": self.current_backoff,
-            "offline_queue": queue_stats,
-            "inflight_messages": inflight_count,
+            "offline_queue":          self.offline_queue.get_stats(),
+            "inflight_messages":      self.inflight_tracker.count_messages(),
         }
 
     def start(self):
-        """Start the network loop."""
+        """Start the MQTT network loop."""
         self.client.loop_start()
+        self.logger.info("Network loop started")
 
     def stop(self):
-        """Stop the network loop and close connections."""
+        """Stop the network loop, close storage systems, and close the database."""
+        self.logger.info("Shutting down client", client_id=self.client_id)
+
         self.reconnect_in_progress = False
         self._stop_queue_drainer()
         self.client.loop_stop()
+
+        # Storage systems in shared mode do not close the connection themselves,
+        # so we close it here after both are done with it.
         self.inflight_tracker.close()
         self.offline_queue.close()
+
+        with self._db_lock:
+            self._db_conn.close()
+
+        self.logger.info("Client stopped", client_id=self.client_id)
+        self.logger.log_event("client_stopped", client_id=self.client_id)
