@@ -54,32 +54,41 @@ The client is the only thing your application talks to directly. `InflightTracke
 pip install -r requirements.txt
 ```
 
-SQLite3 is part of the Python standard library, so no separate install needed there.
+SQLite3 is part of the Python standard library, so no separate install needed.
+
+The recommended way to create a client is via `from_config()`:
 
 ```python
+from config import Config
 from production_client import ProductionMQTTClient
-import json
 
-client = ProductionMQTTClient(
-    client_id="my_edge_device_001",
-    broker_host="localhost",
-    broker_port=1883,
-    max_queue_size=1000
-)
+config = Config.from_file("config.json")
+client = ProductionMQTTClient.from_config(config)
 
 client.connect()
 client.start()
 
-# Works whether the broker is reachable or not — routing is handled internally
+# Works whether the broker is reachable or not - routing is handled internally
 client.publish(
     topic="sensors/temperature",
-    payload=json.dumps({"value": 23.5, "unit": "C"}),
+    payload='{"value": 23.5, "unit": "C"}',
     qos=1,
     priority=5
 )
 
 stats = client.get_statistics()
 print(stats)
+```
+
+The direct constructor is still available for cases where a Config object isn't appropriate, such as unit tests:
+
+```python
+client = ProductionMQTTClient(
+    client_id="my_edge_device_001",
+    broker_host="localhost",
+    broker_port=1883,
+    max_queue_size=1000,
+)
 ```
 
 ---
@@ -204,6 +213,16 @@ sudo systemctl start mosquitto
 ---
 
 ## Changelog
+
+### v0.4.0 — Internal Consistency
+
+This release is about making the components of the library actually work as a unified system rather than as a collection of loosely connected modules.
+
+**Single database file** — `InflightTracker` and `OfflineQueue` previously maintained separate SQLite files (`inflight_messages.db` and `mqtt_client.db`). They now share a single connection to a single file, coordinated by a shared lock. Both tables live side by side in `mqtt_client.db`. This simplifies the lifecycle (one connection to open, one to close), eliminates the extra file handle, and removes the possibility of the two databases ever getting out of sync. Backward compatibility is preserved: both classes still accept a standalone `db_path` argument if used outside of `ProductionMQTTClient`.
+
+**Config integration** — `ProductionMQTTClient` now has a `from_config()` class method that reads all relevant settings — broker address, queue size, database path, log directory, backoff limits — from a `Config` object. Previously, the client was hardcoding values like `min_backoff=1` and `max_backoff=60` internally and ignoring the `Config` class entirely despite it being part of the project. `from_config()` is now the recommended instantiation path. The direct constructor still works.
+
+**Logger integration** — All `print()` calls across `production_client.py`, `inflight_tracker.py`, and `offline_queue.py` have been replaced with structured log calls via `ProductionLogger`. Connection events log at `INFO`, queue operations at `DEBUG`, warnings at `WARNING`, errors at `ERROR`. This means operators can now control verbosity via `log_level` in config, route output to rotating log files, and feed structured events to monitoring tools — none of which was possible when everything went to stdout.
 
 ### v0.3.0 — Data Integrity
 
