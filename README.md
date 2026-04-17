@@ -184,6 +184,8 @@ sudo systemctl start mosquitto
 ├── inflight_tracker.py       # SQLite-backed inflight tracker
 ├── offline_queue.py          # SQLite-backed offline queue
 ├── test_13.py                # End-to-end simulation
+├── tests                     # Created a new folder to hold test scripts
+├── assets                    # Pics of tests and simulations
 ├── config.template.json      # Copy this to config.json
 ├── requirements.txt
 ├── README.md
