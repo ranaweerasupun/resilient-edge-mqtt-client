@@ -1,9 +1,19 @@
 # -*- coding: utf-8 -*-
+"""
+offline_queue.py — holds messages that couldn't be published due to loss of connectivity.
+
+v0.4.0: Accepts a shared SQLite connection and lock from ProductionMQTTClient,
+        so both storage systems live in a single database file. Falls back to
+        creating its own connection if used standalone (backward compatible).
+        All print() calls replaced with structured logger output.
+"""
+
 import sqlite3
 import json
 import threading
 from datetime import datetime
 from pathlib import Path
+from production_logger import get_logger
 
 class OfflineQueue:
     """
