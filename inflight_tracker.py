@@ -1,16 +1,15 @@
 """
 inflight_tracker.py — tracks MQTT messages that have been sent but not yet acknowledged.
 
-SQLite is used for persistence so that inflight state survives a process restart.
-The connection is opened with check_same_thread=False because the MQTT network
-thread and the main application thread both call into this class. A threading lock
-serialises access so only one thread touches the database at a time.
+v0.3.0: Payload stored as BLOB (raw bytes) to prevent binary data corruption.
+        Schema migration handles upgrade from TEXT-based v0.2.0 databases.
 
-v0.3.0 changes:
-  - Payload is now stored as BLOB (raw bytes) instead of TEXT (str(payload)).
-    The old TEXT schema silently corrupted binary payloads on resend.
-  - Schema migration: if the old TEXT-based table is detected on startup, it is
-    dropped and recreated. The corrupted data is not worth keeping.
+v0.4.0: Accepts a shared SQLite connection and lock from ProductionMQTTClient,
+        so the inflight table and offline queue table live in a single database
+        file rather than two separate ones. Falls back to opening its own
+        connection if used in standalone mode (backward compatible).
+        All print() calls replaced with structured logger output.
+        
 """
 
 import sqlite3
