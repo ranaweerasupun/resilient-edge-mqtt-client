@@ -27,7 +27,7 @@ class OfflineQueue:
     since the MQTT network thread and the application thread both write here.
     """
     
-    def __init__(self, db_path="mqtt_client.db", max_size=1000):
+    def __init__(self, db_path="mqtt_client.db", max_size=1000, conn=None, lock=None):
         """
         Initialise the offline queue.
 
@@ -39,13 +39,23 @@ class OfflineQueue:
         As a rough guide: 1000 messages at ~500 bytes each is around 500 KB.
         At 10 messages per minute, that covers roughly 100 minutes of outage.
         """
-        self.db_path = db_path
+        self.logger = get_logger()
         self.max_size = max_size
+
+        if conn is not None:
+            # Shared mode — ProductionMQTTClient owns the connection lifecycle.
+            # row_factory may already be set; setting it again is harmless.
+            self.conn = conn
+            self.conn.row_factory = sqlite3.Row
+            self.lock = lock
+            self._owns_connection = False
+        else:
+            # Standalone mode — we own the connection and must close it.
+            self.conn = sqlite3.connect(db_path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            self.lock = threading.Lock()
+            self._owns_connection = True
         
-        self.lock = threading.Lock()
-        
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
         self._create_tables()
     
     def _create_tables(self):
