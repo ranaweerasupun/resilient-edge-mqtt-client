@@ -3,8 +3,7 @@
 test_v030.py — Simulation script for v0.3.0 (Data Integrity)
 
 Written specifically for the v0.3.0 codebase. It uses only the APIs and
-constructor signatures that exist in v0.3.0 — no Config, no from_config(),
-no shared database connections, no log_dir parameter.
+constructor signatures that exist in v0.3.0.
 
 v0.3.0 fixed three silent data-loss bugs. This script demonstrates each
 one so you can see the correct behaviour with your own eyes.
