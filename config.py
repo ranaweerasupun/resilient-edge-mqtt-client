@@ -6,6 +6,9 @@ Configuration management for the production MQTT client.
 Supports loading from a JSON file, a simple key=value file, environment
 variables, or a plain dictionary. All sources are merged with the same
 precedence order and validated on load.
+
+v0.5.0: Added certfile and keyfile to DEFAULTS to support mutual TLS
+        (client certificate authentication), used by brokers such as AWS IoT Core.
 """
 
 import os
