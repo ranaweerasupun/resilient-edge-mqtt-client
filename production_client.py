@@ -2,19 +2,20 @@
 production_client.py — MQTT client with offline queuing and inflight tracking.
 
 v0.3.0: Fixed payload encoding corruption, resend-tracking gap, and the
-        publish() race condition. See v0.3.0 release notes for details.
+        publish() race condition.
 
-v0.4.0: Internal consistency overhaul.
-        - Both storage systems (InflightTracker, OfflineQueue) now share a
-          single SQLite connection and a single lock. One database file
-          instead of two.
-        - Config integration: from_config() factory method reads all settings
-          from a Config object. Direct constructor still works (backward compat).
-        - Logger integration: all print() calls replaced with structured
-          logger output via ProductionLogger. The logger is initialised first
-          in __init__ so it is available throughout the object lifecycle.
-        - New constructor parameters: db_path, min_backoff, max_backoff,
-          log_dir, log_level. These were previously hardcoded.
+v0.4.0: Single shared database, Config integration via from_config(),
+        logger integration replacing all print() calls.
+
+v0.5.0: Production connectivity overhaul.
+        - TLS support: call tls_set() before connect() when use_tls=True.
+          Supports one-way TLS (CA cert only) and mutual TLS (client cert + key).
+        - Authentication: call username_pw_set() before connect() when
+          credentials are provided.
+        - Queue drainer threading fix: the boolean flag + join(timeout=2)
+          pattern has been replaced with threading.Event. _stop_queue_drainer()
+          now signals the drainer and returns immediately, so it is safe to call
+          from the MQTT network callback thread without stalling paho's event loop.
 """
 
 import sqlite3
