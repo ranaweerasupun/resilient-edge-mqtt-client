@@ -69,19 +69,27 @@ class ProductionMQTTClient:
         max_backoff=60,
         log_dir="./logs",
         log_level="INFO",
+        # v0.5.0: TLS parameters
+        use_tls=False,
+        ca_certs=None,
+        certfile=None,
+        keyfile=None,
+        # v0.5.0: Authentication parameters
+        username=None,
+        password=None,
     ):
-        """
-        Initialise the client.
-
-        Initialisation order matters here. The logger must be set up first
-        because every subsequent step may need to log something (including
-        the SQLite schema migration that runs inside InflightTracker and
-        OfflineQueue). The shared database connection is created second,
-        before the two storage systems that depend on it.
-        """
-        self.client_id = client_id
+        self.client_id   = client_id
         self.broker_host = broker_host
         self.broker_port = broker_port
+
+        # TLS and auth — stored here so connect() and _reconnect_with_backoff()
+        # can both apply them consistently on every connection attempt.
+        self.use_tls  = use_tls
+        self.ca_certs = ca_certs
+        self.certfile = certfile
+        self.keyfile  = keyfile
+        self.username = username
+        self.password = password
 
         # ----------------------------------------------------------------
         # Step 1: Logger — must come first so everything below can log
