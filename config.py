@@ -52,8 +52,16 @@ class Config:
         # Authentication (optional)
         "username": None,
         "password": None,
+        
+        # TLS (optional)
+        # Set use_tls=True and provide at minimum ca_certs to verify the broker.
+        # certfile and keyfile are only needed for mutual TLS (mTLS), where the
+        # broker also verifies the client's identity using a client certificate.
+        # AWS IoT Core is the most common broker that requires mTLS.
         "use_tls": False,
-        "ca_certs": None,
+        "ca_certs": None,           # Path to CA certificate file
+        "certfile": None,           # Path to client certificate file (mTLS only)
+        "keyfile": None,            # Path to client private key file (mTLS only)
         
         # Queue management
         "max_queue_size": 1000,
