@@ -36,6 +36,10 @@ The client is the only thing your application talks to directly. `InflightTracke
 
 **Zero message loss** — Messages published while offline are written to SQLite and replayed automatically once the broker is reachable again. QoS 1/2 messages that were acknowledged by your app but not yet confirmed by the broker are tracked and re-sent after reconnection.
 
+**TLS encryption** — Set `use_tls=True` and provide a CA certificate to encrypt all traffic between the device and the broker. Mutual TLS (where the broker also verifies the device's identity using a client certificate) is supported for brokers that require it, such as AWS IoT Core.
+
+**Authentication** — Username and password credentials are passed in the MQTT CONNECT packet. Works alongside TLS so credentials are always encrypted in transit.
+
 **Priority-based eviction** — Each message carries a priority from 1 to 10. When the queue fills up, lower-priority messages are dropped first. A critical alert can displace routine telemetry rather than being blocked behind a full queue of sensor readings.
 
 **Exponential backoff** — Reconnection intervals double on each failed attempt, up to a configurable ceiling. This matters in fleet deployments — you don't want hundreds of devices hammering a broker the moment it comes back online.
@@ -56,40 +60,66 @@ pip install -r requirements.txt
 
 SQLite3 is part of the Python standard library, so no separate install needed.
 
-The recommended way to create a client is via `from_config()`:
+### Without TLS (development / local broker)
 
 ```python
 from config import Config
 from production_client import ProductionMQTTClient
 
-config = Config.from_file("config.json")
-client = ProductionMQTTClient.from_config(config)
+config = Config({
+    "client_id":   "my_device_001",
+    "broker_host": "localhost",
+    "broker_port": 1883,
+})
 
+client = ProductionMQTTClient.from_config(config)
 client.connect()
 client.start()
 
-# Works whether the broker is reachable or not - routing is handled internally
 client.publish(
     topic="sensors/temperature",
     payload='{"value": 23.5, "unit": "C"}',
     qos=1,
-    priority=5
+    priority=5,
 )
-
-stats = client.get_statistics()
-print(stats)
 ```
 
-The direct constructor is still available for cases where a Config object isn't appropriate, such as unit tests:
+### With TLS (production broker)
 
 ```python
-client = ProductionMQTTClient(
-    client_id="my_edge_device_001",
-    broker_host="localhost",
-    broker_port=1883,
-    max_queue_size=1000,
-)
+config = Config({
+    "client_id":   "my_device_001",
+    "broker_host": "mqtt.example.com",
+    "broker_port": 8883,         # Standard TLS port
+    "use_tls":     True,
+    "ca_certs":    "/etc/ssl/certs/broker-ca.pem",
+    "username":    "device_001",
+    "password":    "secret",
+})
+
+client = ProductionMQTTClient.from_config(config)
+client.connect()
+client.start()
 ```
+
+### With mutual TLS (AWS IoT Core, mTLS brokers)
+
+```python
+config = Config({
+    "client_id":   "my_device_001",
+    "broker_host": "xxxxxxxxxxxx.iot.us-east-1.amazonaws.com",
+    "broker_port": 8883,
+    "use_tls":     True,
+    "ca_certs":    "/certs/AmazonRootCA1.pem",
+    "certfile":    "/certs/device-certificate.pem.crt",
+    "keyfile":     "/certs/device-private.pem.key",
+})
+
+client = ProductionMQTTClient.from_config(config)
+client.connect()
+client.start()
+```
+
 
 ---
 
@@ -101,25 +131,33 @@ Copy the template and fill in your values:
 cp config.template.json config.json
 ```
 
-The file is gitignored so credentials stay out of version control. All fields have sensible defaults except `client_id`, which must be set explicitly because there's no safe default for a value that has to be unique across your entire fleet.
+It is better to gitignore the file so credentials stay out of version control. All fields have sensible defaults except `client_id`, which must be set explicitly because there's no safe default for a value that has to be unique across your entire fleet.
 
 | Field | Default | Description |
 |---|---|---|
 | `client_id` | *(required)* | Unique identifier for this device |
 | `broker_host` | `localhost` | MQTT broker hostname or IP |
-| `broker_port` | `1883` | MQTT broker port |
+| `broker_port` | `1883` | MQTT broker port (use `8883` for TLS) |
+| `use_tls` | `false` | Enable TLS encryption |
+| `ca_certs` | `null` | Path to CA certificate file |
+| `certfile` | `null` | Path to client certificate (mutual TLS only) |
+| `keyfile` | `null` | Path to client private key (mutual TLS only) |
+| `username` | `null` | MQTT username |
+| `password` | `null` | MQTT password |
 | `max_queue_size` | `1000` | Maximum offline queue depth |
 | `min_backoff` | `1` | Minimum reconnection wait in seconds |
 | `max_backoff` | `60` | Maximum reconnection wait in seconds |
 | `log_dir` | `./logs` | Directory for log files |
 | `log_level` | `INFO` | One of: DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `db_path` | `./mqtt_client.db` | Path for the SQLite database files |
+| `db_path` | `./mqtt_client.db` | Path for the shared SQLite database |
 
-You can also load configuration from environment variables prefixed with `MQTT_`:
+Configuration can also be loaded from environment variables prefixed with `MQTT_`:
 
 ```bash
 export MQTT_BROKER_HOST=mqtt.example.com
 export MQTT_CLIENT_ID=device_001
+export MQTT_USE_TLS=true
+export MQTT_CA_CERTS=/etc/ssl/certs/broker-ca.pem
 ```
 
 Then call `Config.from_env()` instead of `Config.from_file()`.
@@ -175,31 +213,12 @@ sudo systemctl start mosquitto
 
 `offline_queue.py` — SQLite-backed queue for messages waiting to be sent. Handles priority ordering, batch retrieval, and capacity management. Also internal.
 
-`config.py` — The `Config` class. Load with `Config.from_file("config.json")`, `Config.from_env()`, or `Config({...})`. All supported fields and their defaults are listed in `Config.DEFAULTS`.
+`config.py` — The `Config` class. Load with `Config.from_file("config.json")`, `Config.from_env()`, or `Config({...})`. All supported fields and their defaults are listed in `Config.DEFAULTS`. Supports JSON files, key=value files, environment variables, and plain dicts. All fields validated at load time.
 
-`production_logger.py` — The `ProductionLogger` class and `get_logger()` factory. Call `get_logger("my_app")` from any module to get the shared singleton instance.
+`production_logger.py` — The `ProductionLogger` class and `get_logger()` factory. Rotating file logs plus a structured `.jsonl` metrics file.
 
 `test_13.py` — End-to-end simulation that publishes temperature readings every 5 seconds and prints queue statistics every 10 readings. Specifically designed to demonstrate offline behaviour.
 
----
-
-## Project structure
-
-```
-.
-├── production_client.py      # Main client
-├── production_logger.py      # Rotating logger and metrics writer
-├── config.py                 # Configuration loader and validator
-├── inflight_tracker.py       # SQLite-backed inflight tracker
-├── offline_queue.py          # SQLite-backed offline queue
-├── test_13.py                # End-to-end simulation
-├── tests                     # Created a new folder to hold test scripts
-├── assets                    # Pics of tests and simulations
-├── config.template.json      # Copy this to config.json
-├── requirements.txt
-├── README.md
-└── LICENSE
-```
 
 ---
 
@@ -207,12 +226,22 @@ sudo systemctl start mosquitto
 
 - Python 3.7 or later
 - `paho-mqtt`
-- An MQTT broker (Mosquitto works well for local development)
+- An MQTT broker (Mosquitto for local development; any TLS-capable broker for production)
 - SQLite3 (included in the standard library)
 
 ---
 
 ## Changelog
+
+### v0.5.0 — Production Connectivity
+
+This release makes the library actually connectable to real production brokers and fixes a threading bug that could cause paho's network loop to stall on disconnect.
+
+**TLS support** — `connect()` now calls `client.tls_set()` before opening the connection when `use_tls=True`. Providing `ca_certs` enables one-way TLS, where the client verifies the broker's certificate against a known CA. Providing `certfile` and `keyfile` additionally enables mutual TLS (mTLS), where the broker also verifies the client's identity. mTLS is required by AWS IoT Core and some other enterprise brokers. Without this release, the `use_tls`, `ca_certs`, `certfile`, and `keyfile` config fields existed but were silently ignored.
+
+**Authentication** — `connect()` now calls `client.username_pw_set()` before opening the connection when a `username` is configured. Previously the `username` and `password` config fields were also silently ignored.
+
+**Queue drainer threading fix** — The `_stop_queue_drainer()` method previously called `thread.join(timeout=2)`, which blocks the calling thread for up to 2 seconds. This method is called from `_on_disconnect()`, which runs on paho's internal network thread. Blocking that thread means paho cannot process any network events — incoming packets, further disconnections, reconnection acknowledgments — for the duration of the join. The fix replaces the boolean flag and `join()` pattern with a `threading.Event`. The drainer uses `event.wait(timeout=N)` instead of `time.sleep(N)`, which means it can be interrupted immediately when the event is set. `_stop_queue_drainer()` now simply sets the event and returns — no blocking at all. The `stop()` method, which is called by the user rather than paho's thread, still joins the drainer thread for a clean shutdown.
 
 ### v0.4.0 — Internal Consistency
 
