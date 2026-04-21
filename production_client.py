@@ -41,12 +41,18 @@ _LOG_LEVEL_MAP = {
 
 class ProductionMQTTClient:
     """
-    MQTT client with offline queuing, inflight tracking, TLS, and authentication.
+    MQTT client with offline queuing, inflight tracking, TLS, authentication,
+    and bidirectional communication via subscribe/unsubscribe.
 
-    The recommended way to create an instance is via the from_config() class method:
+    Recommended instantiation:
 
         config = Config.from_file("config.json")
         client = ProductionMQTTClient.from_config(config)
+
+        def on_command(topic, payload, qos, retain):
+            print(f"Command on {topic}: {payload}")
+
+        client.subscribe("devices/my_device/commands/#", on_command)
         client.connect()
         client.start()
     """
