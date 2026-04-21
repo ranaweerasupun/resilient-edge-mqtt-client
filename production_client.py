@@ -1,21 +1,20 @@
 """
-production_client.py — MQTT client with offline queuing and inflight tracking.
+production_client.py — MQTT client with offline queuing, inflight tracking,
+TLS, authentication, and bidirectional communication.
 
-v0.3.0: Fixed payload encoding corruption, resend-tracking gap, and the
-        publish() race condition.
-
-v0.4.0: Single shared database, Config integration via from_config(),
-        logger integration replacing all print() calls.
-
-v0.5.0: Production connectivity overhaul.
-        - TLS support: call tls_set() before connect() when use_tls=True.
-          Supports one-way TLS (CA cert only) and mutual TLS (client cert + key).
-        - Authentication: call username_pw_set() before connect() when
-          credentials are provided.
-        - Queue drainer threading fix: the boolean flag + join(timeout=2)
-          pattern has been replaced with threading.Event. _stop_queue_drainer()
-          now signals the drainer and returns immediately, so it is safe to call
-          from the MQTT network callback thread without stalling paho's event loop.
+v0.3.0: Fixed payload encoding corruption, resend-tracking gap, and publish() race condition.
+v0.4.0: Single shared database, Config integration via from_config(), logger integration.
+v0.5.0: TLS and authentication wired into connect(). threading.Event for queue drainer.
+v0.6.0: Subscribe support. The client is now fully bidirectional.
+        - subscribe(topic, callback, qos) registers a callback and immediately
+          subscribes if connected, or defers until the next connection.
+        - unsubscribe(topic) removes the callback and unsubscribes from the broker.
+        - _restore_subscriptions() is called from _on_connect() so subscriptions
+          survive reconnections transparently.
+        - _on_message() routes incoming messages to the correct callback using
+          MQTT wildcard matching (+ and #).
+        - _topic_matches() implements the full MQTT topic matching specification.
+        - get_statistics() now includes active_subscriptions count.
 """
 
 import sqlite3
