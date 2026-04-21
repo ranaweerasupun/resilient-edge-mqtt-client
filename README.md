@@ -8,9 +8,7 @@ An MQTT client built for devices that live in the real world — Raspberry Pis, 
 
 Standard MQTT clients assume the network is up. On an edge device, that assumption breaks regularly. Cellular links drop, Wi-Fi roams, VPNs time out, brokers restart. Most client libraries handle this by... not handling it. They hand the problem back to your application code and wish you luck.
 
-This library treats disconnection as a normal operating condition rather than an edge case. When the broker is unreachable, outgoing messages are written to a local SQLite queue and held there until the connection returns. Messages that were already sent but not yet acknowledged are tracked separately so they can be re-sent after reconnection — closing the gap that most libraries leave open.
-
-The goal is simple: if you call `publish()`, the message eventually arrives at the broker. Full stop.
+This library treats disconnection as a normal operating condition rather than an edge case. When the broker is unreachable, outgoing messages are written to a local SQLite queue and held there until the connection returns. Messages that were already sent but not yet acknowledged are tracked separately so they can be re-sent after reconnection. And as of v0.6.0, the client is fully bidirectional — you can subscribe to topics and receive messages just as reliably as you can publish them.
 
 ---
 
@@ -59,6 +57,64 @@ pip install -r requirements.txt
 ```
 
 SQLite3 is part of the Python standard library, so no separate install needed.
+
+### Publishing only (no subscriptions)
+
+```python
+from config import Config
+from production_client import ProductionMQTTClient
+
+config = Config.from_file("config.json")
+client = ProductionMQTTClient.from_config(config)
+client.connect()
+client.start()
+
+client.publish(
+    topic="sensors/temperature",
+    payload='{"value": 23.5, "unit": "C"}',
+    qos=1,
+    priority=5,
+)
+```
+
+### Publishing and subscribing
+
+```python
+from config import Config
+from production_client import ProductionMQTTClient
+
+config = Config.from_file("config.json")
+client = ProductionMQTTClient.from_config(config)
+
+# Register callbacks before connecting.
+# Subscriptions registered offline are stored and sent to the broker
+# automatically on the first successful connection.
+
+def on_command(topic, payload, qos, retain):
+    print(f"Command received: {payload.decode()}")
+
+def on_config_update(topic, payload, qos, retain):
+    print(f"Config update on {topic}: {payload.decode()}")
+
+client.subscribe("devices/my_device/commands", on_command, qos=1)
+client.subscribe("devices/my_device/config/#", on_config_update, qos=1)
+
+client.connect()
+client.start()
+```
+
+### Wildcard subscriptions
+
+```python
+# '+' matches exactly one level
+client.subscribe("sensors/+/temperature", on_temperature)
+# Receives: sensors/room1/temperature, sensors/room2/temperature
+# Does NOT receive: sensors/room1/floor2/temperature
+
+# '#' matches zero or more levels — must be the last character
+client.subscribe("devices/#", on_any_device_message)
+# Receives: devices/001, devices/001/status, devices/001/sensors/temp
+```
 
 ### Without TLS (development / local broker)
 
@@ -232,6 +288,23 @@ sudo systemctl start mosquitto
 ---
 
 ## Changelog
+
+### v0.6.0 — Bidirectional Communication
+
+Up to v0.5.0, the client could only publish. This release makes it a full MQTT client.
+
+**subscribe(topic, callback, qos)** registers a callback for incoming messages. It can be called before `connect()` — subscriptions registered while offline are stored and sent to the broker automatically on the first successful connection. The callback receives `(topic, payload, qos, retain)` and can be registered for wildcard topics using `+` and `#`.
+
+**unsubscribe(topic)** removes the callback and, if connected, sends an UNSUBSCRIBE packet to the broker. The topic is also removed from the internal registry so it is not re-registered on the next reconnection.
+
+**Automatic subscription restoration** — `_restore_subscriptions()` is called from `_on_connect()` every time a connection is established. It replays the full subscription registry to the broker, covering both subscriptions that existed before the disconnect and any new ones registered while offline. This is always done explicitly, even when `clean_session=False` would allow the broker to restore them, because the broker may have restarted and lost its session state.
+
+**Wildcard matching** — `_topic_matches()` implements the full MQTT wildcard specification. `+` matches exactly one topic level. `#` matches zero or more levels and must be the last character. The routing in `_on_message()` calls this for every registered pattern against each incoming message topic.
+
+**Thread-safe message routing** — `_on_message()` runs on paho's network thread. It takes a snapshot of the subscriptions dict under the lock and releases the lock before calling any user callback. This prevents a slow callback from blocking `subscribe()` or `unsubscribe()` calls on the application thread, and eliminates the risk of deadlock.
+
+**get_statistics()** now includes `active_subscriptions` so health checks and monitoring dashboards can verify the expected number of subscriptions is in place.
+
 
 ### v0.5.0 — Production Connectivity
 
