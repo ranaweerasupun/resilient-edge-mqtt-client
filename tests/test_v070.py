@@ -131,3 +131,14 @@ for i in range(5):
           f"connected={connected}  queue={q_pct:.0f}%")
     time.sleep(2)
 
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+
+section("Final Statistics")
+_, body = query_health()
+print(json.dumps(body, indent=2, default=str))
+
+client.stop()
+print(f"\n{SEPARATOR}")
+print("  v0.7.0 demo complete.")
+print(f"  Health check server stopped — port {HEALTH_CHECK_PORT} released.")
+print(SEPARATOR)
