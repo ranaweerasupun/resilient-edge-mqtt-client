@@ -44,26 +44,21 @@ _LOG_LEVEL_MAP = {
     "CRITICAL": logging.CRITICAL,
 }
 
-
 # Queue capacity thresholds for health status classification.
 # Below DEGRADED_THRESHOLD  → healthy.
 # At or above it             → degraded (still connected, but trending toward full).
 _DEGRADED_THRESHOLD = 80.0   # percent
 
+
 class ProductionMQTTClient:
     """
     MQTT client with offline queuing, inflight tracking, TLS, authentication,
-    and bidirectional communication via subscribe/unsubscribe. And an HTTP health check endpoint.
+    bidirectional communication, and an HTTP health check endpoint.
 
     Recommended instantiation:
 
         config = Config.from_file("config.json")
         client = ProductionMQTTClient.from_config(config)
-
-        def on_command(topic, payload, qos, retain):
-            print(f"Command on {topic}: {payload}")
-
-        client.subscribe("devices/my_device/commands/#", on_command)
         client.connect()
         client.start()
 
@@ -83,73 +78,47 @@ class ProductionMQTTClient:
         max_backoff=60,
         log_dir="./logs",
         log_level="INFO",
-        # v0.5.0: TLS parameters
         use_tls=False,
         ca_certs=None,
         certfile=None,
         keyfile=None,
-        # v0.5.0: Authentication parameters
         username=None,
         password=None,
         # v0.7.0: health check parameters
         enable_health_check=False,
         health_check_port=8080,
     ):
-        self.client_id   = client_id
-        self.broker_host = broker_host
-        self.broker_port = broker_port
-
-        # TLS and auth — stored here so connect() and _reconnect_with_backoff()
-        # can both apply them consistently on every connection attempt.
-        self.use_tls  = use_tls
-        self.ca_certs = ca_certs
-        self.certfile = certfile
-        self.keyfile  = keyfile
-        self.username = username
-        self.password = password
+        self.client_id          = client_id
+        self.broker_host        = broker_host
+        self.broker_port        = broker_port
+        self.use_tls            = use_tls
+        self.ca_certs           = ca_certs
+        self.certfile           = certfile
+        self.keyfile            = keyfile
+        self.username           = username
+        self.password           = password
         self._enable_health_check = enable_health_check
         self._health_check_port   = health_check_port
 
-        # ----------------------------------------------------------------
-        # Step 1: Logger — added first so everything below can log
-        # ----------------------------------------------------------------
+        # Step 1: Logger — must come first
         log_level_int = _LOG_LEVEL_MAP.get(log_level.upper(), logging.INFO)
-        self.logger = get_logger(
-            "mqtt_client",
-            log_dir=log_dir,
-            log_level=log_level_int,
-        )
+        self.logger = get_logger("mqtt_client", log_dir=log_dir, log_level=log_level_int)
 
-        # ----------------------------------------------------------------
         # Step 2: Shared database connection and lock
-        # ----------------------------------------------------------------
         self._db_conn = sqlite3.connect(db_path, check_same_thread=False)
         self._db_lock = threading.Lock()
-
         self.logger.info("Database opened", path=db_path)
 
-        # ----------------------------------------------------------------
-        # Step 3: Storage systems — both receive the shared connection
-        # ----------------------------------------------------------------
-        self.inflight_tracker = InflightTracker(
-            conn=self._db_conn,
-            lock=self._db_lock,
-        )
-        self.offline_queue = OfflineQueue(
-            conn=self._db_conn,
-            lock=self._db_lock,
-            max_size=max_queue_size,
-        )
+        # Step 3: Storage systems
+        self.inflight_tracker = InflightTracker(conn=self._db_conn, lock=self._db_lock)
+        self.offline_queue    = OfflineQueue(conn=self._db_conn, lock=self._db_lock, max_size=max_queue_size)
 
-        # ----------------------------------------------------------------
         # Step 4: Connection state
-        # ----------------------------------------------------------------
-        self.is_connected = False
-        self.connection_lock = threading.Lock()
-
-        self.min_backoff     = min_backoff
-        self.max_backoff     = max_backoff
-        self.current_backoff = self.min_backoff
+        self.is_connected          = False
+        self.connection_lock       = threading.Lock()
+        self.min_backoff           = min_backoff
+        self.max_backoff           = max_backoff
+        self.current_backoff       = self.min_backoff
         self.reconnect_in_progress = False
 
         # Step 5: Subscription registry
@@ -191,13 +160,7 @@ class ProductionMQTTClient:
 
     @classmethod
     def from_config(cls, config):
-        """
-        Create a ProductionMQTTClient from a Config object.
-
-        This is the recommended instantiation path in production. All settings —
-        including TLS and authentication credentials added in v0.5.0 — are read
-        from the Config object automatically.
-        """
+        """Create a ProductionMQTTClient from a Config object (recommended path)."""
         return cls(
             client_id           = config.get("client_id"),
             broker_host         = config.get("broker_host"),
@@ -217,7 +180,6 @@ class ProductionMQTTClient:
             enable_health_check = config.get("enable_health_check"),
             health_check_port   = config.get("health_check_port"),
         )
-
 
     # ------------------------------------------------------------------
     # Health check server (v0.7.0)
@@ -348,9 +310,6 @@ class ProductionMQTTClient:
         self._health_check_server = None
         self.logger.info("Health check server stopped")
 
-
-
-
     # ------------------------------------------------------------------
     # MQTT callbacks
     # ------------------------------------------------------------------
@@ -376,7 +335,7 @@ class ProductionMQTTClient:
                 session_present=session_present,
             )
 
-            self.current_backoff = self.min_backoff
+            self.current_backoff       = self.min_backoff
             self.reconnect_in_progress = False
 
             self._resend_inflight_messages()
@@ -386,18 +345,10 @@ class ProductionMQTTClient:
             self.logger.error("Connection refused by broker", return_code=rc)
 
     def _on_disconnect(self, client, userdata, rc):
-        """
-        Handle disconnection.
-
-        This callback runs on paho's network thread. It must return quickly —
-        any blocking call here delays paho's ability to process further events.
-        _stop_queue_drainer() uses threading.Event so it signals the drainer
-        and returns immediately rather than waiting for the drainer to exit.
-        """
+        """Handle disconnection. Safe to call from paho's network thread."""
         with self.connection_lock:
             self.is_connected = False
 
-        # Non-blocking — sets the event and returns immediately
         self._stop_queue_drainer()
 
         if rc == 0:
@@ -413,148 +364,191 @@ class ProductionMQTTClient:
         self.logger.debug("Message acknowledged by broker", mid=mid)
         self.inflight_tracker.remove_message(mid)
 
+    def _on_message(self, client, userdata, message):
+        """
+        Route an incoming message to all matching registered callbacks.
+        Takes a snapshot of _subscriptions before releasing the lock
+        to avoid holding the lock during user callback execution.
+        """
+        topic  = message.topic
+        qos    = message.qos
+        retain = bool(message.retain)
+
+        self.logger.debug(
+            "Message received",
+            topic=topic,
+            qos=qos,
+            retain=retain,
+            size=len(message.payload),
+        )
+
+        with self._subscription_lock:
+            snapshot = list(self._subscriptions.items())
+
+        matched = False
+        for pattern, (callback, _) in snapshot:
+            if self._topic_matches(pattern, topic):
+                matched = True
+                try:
+                    callback(topic, message.payload, qos, retain)
+                except Exception as e:
+                    self.logger.error(
+                        "Callback raised an exception",
+                        topic=topic,
+                        pattern=pattern,
+                        error=str(e),
+                    )
+
+        if not matched:
+            self.logger.warning("Received message with no matching callback", topic=topic)
+
+    # ------------------------------------------------------------------
+    # Subscription management
+    # ------------------------------------------------------------------
+
+    def subscribe(self, topic, callback, qos=1):
+        """
+        Subscribe to a topic and register a callback for incoming messages.
+
+        Safe to call before connect(). Subscriptions registered offline are
+        stored and sent to the broker automatically on the next connection.
+
+        Callback signature: callback(topic: str, payload: bytes, qos: int, retain: bool)
+        """
+        with self._subscription_lock:
+            self._subscriptions[topic] = (callback, qos)
+
+        if self.is_connected:
+            self.client.subscribe(topic, qos)
+            self.logger.info("Subscribed to topic", topic=topic, qos=qos)
+            self.logger.log_event("subscribed", topic=topic, qos=qos)
+        else:
+            self.logger.info(
+                "Subscription stored — will activate on next connection",
+                topic=topic,
+                qos=qos,
+            )
+
+    def unsubscribe(self, topic):
+        """Unsubscribe from a topic and remove its callback."""
+        with self._subscription_lock:
+            removed = self._subscriptions.pop(topic, None)
+
+        if removed is None:
+            self.logger.warning("unsubscribe() called for a topic that was not subscribed", topic=topic)
+            return
+
+        if self.is_connected:
+            self.client.unsubscribe(topic)
+            self.logger.info("Unsubscribed from topic", topic=topic)
+            self.logger.log_event("unsubscribed", topic=topic)
+        else:
+            self.logger.info("Subscription removed from registry (client not connected)", topic=topic)
+
+    def _restore_subscriptions(self):
+        """Re-send all stored subscriptions to the broker after reconnection."""
+        with self._subscription_lock:
+            snapshot = list(self._subscriptions.items())
+
+        if not snapshot:
+            return
+
+        self.logger.info("Restoring subscriptions after reconnection", count=len(snapshot))
+        for topic, (_, qos) in snapshot:
+            self.client.subscribe(topic, qos)
+            self.logger.debug("Restored subscription", topic=topic, qos=qos)
+
+    @staticmethod
+    def _topic_matches(pattern, topic):
+        """
+        Return True if the topic matches the MQTT subscription pattern.
+        '+' matches exactly one level. '#' matches zero or more levels (must be last).
+        """
+        pattern_parts = pattern.split("/")
+        topic_parts   = topic.split("/")
+
+        for i, part in enumerate(pattern_parts):
+            if part == "#":
+                return len(topic_parts) >= i
+            if i >= len(topic_parts):
+                return False
+            if part != "+" and part != topic_parts[i]:
+                return False
+
+        return len(pattern_parts) == len(topic_parts)
+
     # ------------------------------------------------------------------
     # Inflight resend
     # ------------------------------------------------------------------
 
     def _resend_inflight_messages(self):
-        """
-        Resend messages that were inflight during the previous connection.
-
-        Each message gets a new packet ID on resend. The stale tracker entry
-        is removed and a fresh one is inserted with the new ID. See the v0.3.0
-        release notes for a full explanation.
-        """
+        """Resend messages inflight during the previous connection."""
         messages = self.inflight_tracker.get_all_messages()
-
         if not messages:
             return
 
         self.logger.info("Resending inflight messages", count=len(messages))
-
         for msg in messages:
             info = self.client.publish(
-                topic=msg["topic"],
-                payload=msg["payload"],
-                qos=msg["qos"],
-                retain=msg["retain"],
+                topic=msg["topic"], payload=msg["payload"],
+                qos=msg["qos"], retain=msg["retain"],
             )
-
             self.inflight_tracker.remove_message(msg["packet_id"])
-
             if msg["qos"] > 0:
                 self.inflight_tracker.add_message(
-                    packet_id=info.mid,
-                    topic=msg["topic"],
-                    payload=msg["payload"],
-                    qos=msg["qos"],
-                    retain=msg["retain"],
+                    packet_id=info.mid, topic=msg["topic"],
+                    payload=msg["payload"], qos=msg["qos"], retain=msg["retain"],
                 )
-
-            self.logger.debug(
-                "Inflight message resent",
-                topic=msg["topic"],
-                old_mid=msg["packet_id"],
-                new_mid=info.mid,
-            )
+            self.logger.debug("Inflight message resent", topic=msg["topic"],
+                              old_mid=msg["packet_id"], new_mid=info.mid)
 
     # ------------------------------------------------------------------
-    # Queue drainer (v0.5.0: threading.Event-based stop mechanism)
+    # Queue drainer
     # ------------------------------------------------------------------
 
     def _start_queue_drainer(self):
-        """
-        Start the background thread that drains the offline queue.
-
-        The stop event is cleared before the thread starts so that a fresh
-        drainer is not immediately told to stop because of a previous signal.
-        """
+        """Start the background thread that drains the offline queue."""
         if self.queue_drainer_running:
             return
 
         self.queue_drainer_running = True
-
-        # Always clear the event before starting a new drainer thread.
-        # If the previous drainer was stopped by setting this event, the
-        # event is still set from that time. A new drainer thread that
-        # checked the event immediately would exit before doing any work.
         self._stop_drainer_event.clear()
 
         def drain_queue():
             self.logger.info("Queue drainer started")
-
             while not self._stop_drainer_event.is_set() and self.is_connected:
                 messages = self.offline_queue.get_next_batch(batch_size=10)
-
                 if not messages:
-                    # Queue is empty. Wait up to 1 second before checking again,
-                    # but wake immediately if the stop event is set.
-                    # This replaces the old unconditional time.sleep(1).
                     self._stop_drainer_event.wait(timeout=1)
                     continue
 
-                self.logger.info(
-                    "Draining messages from offline queue",
-                    count=len(messages),
-                )
-
+                self.logger.info("Draining messages from offline queue", count=len(messages))
                 for msg in messages:
-                    # Check the stop event before each message so we can exit
-                    # mid-batch promptly rather than finishing the whole batch
-                    # after a stop signal has been issued.
                     if self._stop_drainer_event.is_set() or not self.is_connected:
                         self.logger.warning("Queue drain interrupted")
                         break
 
                     info = self.client.publish(
-                        topic=msg["topic"],
-                        payload=msg["payload"],
-                        qos=msg["qos"],
-                        retain=msg["retain"],
+                        topic=msg["topic"], payload=msg["payload"],
+                        qos=msg["qos"], retain=msg["retain"],
                     )
-
                     if msg["qos"] > 0:
                         self.inflight_tracker.add_message(
-                            packet_id=info.mid,
-                            topic=msg["topic"],
-                            payload=msg["payload"],
-                            qos=msg["qos"],
-                            retain=msg["retain"],
+                            packet_id=info.mid, topic=msg["topic"],
+                            payload=msg["payload"], qos=msg["qos"], retain=msg["retain"],
                         )
-
                     self.offline_queue.remove_message(msg["id"])
-                    self.logger.debug(
-                        "Drained message from offline queue",
-                        topic=msg["topic"],
-                        priority=msg["priority"],
-                    )
-
-                    # Interruptible inter-message delay. Replaces time.sleep(0.1).
-                    # If a stop signal arrives during this wait, we exit cleanly
-                    # on the next loop iteration rather than sleeping through it.
+                    self.logger.debug("Drained message", topic=msg["topic"], priority=msg["priority"])
                     self._stop_drainer_event.wait(timeout=0.1)
 
             self.queue_drainer_running = False
             self.logger.info("Queue drainer stopped")
 
-        self.queue_drainer_thread = threading.Thread(
-            target=drain_queue,
-            daemon=True,
-        )
+        self.queue_drainer_thread = threading.Thread(target=drain_queue, daemon=True)
         self.queue_drainer_thread.start()
 
     def _stop_queue_drainer(self):
-        """
-        Signal the queue drainer to stop. Returns immediately.
-
-        This is safe to call from paho's network callback thread because it
-        does not block. Setting an Event is an O(1) operation that never waits.
-
-        The drainer thread will exit on its own once it sees the event — either
-        at its next loop iteration (within 0.1 seconds during message processing,
-        or within 1 second during idle waiting). For a clean blocking shutdown,
-        stop() calls this method and then joins the thread itself.
-        """
+        """Signal the queue drainer to stop. Returns immediately (non-blocking)."""
         self._stop_drainer_event.set()
 
     # ------------------------------------------------------------------
@@ -570,22 +564,15 @@ class ProductionMQTTClient:
 
         def reconnect_thread():
             while self.reconnect_in_progress:
-                self.logger.info(
-                    "Waiting before reconnection attempt",
-                    backoff_seconds=self.current_backoff,
-                )
+                self.logger.info("Waiting before reconnection attempt", backoff_seconds=self.current_backoff)
                 time.sleep(self.current_backoff)
-
                 try:
                     self.logger.info("Attempting to reconnect")
                     self.client.reconnect()
                     break
                 except Exception as e:
                     self.logger.error("Reconnection attempt failed", error=str(e))
-                    self.current_backoff = min(
-                        self.current_backoff * 2,
-                        self.max_backoff,
-                    )
+                    self.current_backoff = min(self.current_backoff * 2, self.max_backoff)
 
         thread = threading.Thread(target=reconnect_thread, daemon=True)
         thread.start()
@@ -595,150 +582,92 @@ class ProductionMQTTClient:
     # ------------------------------------------------------------------
 
     def connect(self):
-        """
-        Establish the initial connection to the broker.
-
-        v0.5.0: TLS and authentication are configured here, before the
-        connection attempt. Both must be applied to the paho client object
-        before connect() is called — they configure the underlying socket
-        and the CONNECT packet that paho will send to the broker.
-
-        The order matters:
-          1. tls_set()           — configures the SSL socket
-          2. username_pw_set()   — sets credentials in the CONNECT packet
-          3. client.connect()    — opens the socket and starts the handshake
-        """
-        self.logger.info(
-            "Connecting to broker",
-            broker=f"{self.broker_host}:{self.broker_port}",
-            tls=self.use_tls,
-        )
-
+        """Establish the initial connection to the broker."""
+        self.logger.info("Connecting to broker", broker=f"{self.broker_host}:{self.broker_port}", tls=self.use_tls)
         try:
-            # Step 1: Configure TLS if enabled.
-            # tls_set() wraps the socket in SSL and loads the certificates that
-            # will be used to verify the broker's identity (ca_certs) and,
-            # optionally, to prove this client's identity to the broker (certfile
-            # and keyfile, used for mutual TLS / mTLS).
             if self.use_tls:
-                self.client.tls_set(
-                    ca_certs=self.ca_certs,
-                    certfile=self.certfile,   # None unless mTLS is required
-                    keyfile=self.keyfile,     # None unless mTLS is required
-                )
-                self.logger.info(
-                    "TLS configured",
-                    ca_certs=self.ca_certs,
-                    mutual_tls=self.certfile is not None,
-                )
-
-            # Step 2: Configure username/password authentication if provided.
-            # These become fields in the MQTT CONNECT packet. This is MQTT-level
-            # authentication, separate from TLS — TLS secures the transport,
-            # username/password authenticates the client to the broker application.
+                self.client.tls_set(ca_certs=self.ca_certs, certfile=self.certfile, keyfile=self.keyfile)
+                self.logger.info("TLS configured", ca_certs=self.ca_certs, mutual_tls=self.certfile is not None)
             if self.username is not None:
                 self.client.username_pw_set(self.username, self.password)
                 self.logger.info("Authentication configured", username=self.username)
-
-            # Step 3: Open the connection.
             self.client.connect(self.broker_host, self.broker_port, keepalive=60)
-
         except Exception as e:
             self.logger.error("Initial connection failed", error=str(e))
             self._reconnect_with_backoff()
 
     def publish(self, topic, payload, qos=0, retain=False, priority=1):
-        """
-        Publish a message, routing to the broker or the offline queue as appropriate.
-
-        If connected, the message is published directly. For QoS 1/2, it is
-        added to the inflight tracker until acknowledged. If disconnected (or
-        if the send fails mid-flight), the message goes to the offline queue.
-        """
+        """Publish a message, routing to the broker or offline queue as appropriate."""
         with self.connection_lock:
             connected = self.is_connected
 
         if connected:
             try:
                 info = self.client.publish(topic, payload, qos, retain)
-
                 if qos > 0:
                     self.inflight_tracker.add_message(
-                        packet_id=info.mid,
-                        topic=topic,
-                        payload=payload,
-                        qos=qos,
-                        retain=retain,
+                        packet_id=info.mid, topic=topic,
+                        payload=payload, qos=qos, retain=retain,
                     )
-
-                self.logger.debug(
-                    "Message published to broker",
-                    topic=topic,
-                    qos=qos,
-                    mid=info.mid,
-                )
+                self.logger.debug("Message published to broker", topic=topic, qos=qos, mid=info.mid)
                 return info
-
             except Exception as e:
-                self.logger.warning(
-                    "Publish failed mid-flight — routing to offline queue",
-                    topic=topic,
-                    error=str(e),
-                )
+                self.logger.warning("Publish failed mid-flight — routing to offline queue", topic=topic, error=str(e))
                 with self.connection_lock:
                     self.is_connected = False
 
         success = self.offline_queue.add_message(
-            topic=topic,
-            payload=payload,
-            qos=qos,
-            retain=retain,
-            priority=priority,
+            topic=topic, payload=payload, qos=qos, retain=retain, priority=priority,
         )
-
         if not success:
-            self.logger.error(
-                "Message dropped — queue full and could not make room",
-                topic=topic,
-                priority=priority,
-            )
-
+            self.logger.error("Message dropped — queue full", topic=topic, priority=priority)
         return None
 
     def get_statistics(self):
-        """Return a snapshot of current client state."""
+        """
+        Return a snapshot of current client state.
+
+        This is the data source for the health check endpoint. All values
+        are read atomically under their respective locks so the snapshot
+        is self-consistent even under concurrent access.
+        """
+        with self._subscription_lock:
+            subscription_count = len(self._subscriptions)
+
         return {
             "connected":               self.is_connected,
             "current_backoff_seconds": self.current_backoff,
             "offline_queue":           self.offline_queue.get_stats(),
             "inflight_messages":       self.inflight_tracker.count_messages(),
             "tls_enabled":             self.use_tls,
+            "active_subscriptions":    subscription_count,
         }
 
     def start(self):
-        """Start the MQTT network loop."""
+        """
+        Start the MQTT network loop and, if configured, the health check server.
+
+        Both services are started here rather than in __init__() because
+        __init__() should only configure — start() is the explicit signal
+        from the caller that they want background services to begin running.
+        """
         self.client.loop_start()
         self.logger.info("Network loop started")
 
-    def stop(self):
-        """
-        Stop the network loop, drain the queue drainer, and close the database.
+        if self._enable_health_check:
+            self._start_health_check_server()
 
-        Unlike _stop_queue_drainer() (which is non-blocking so it is safe to
-        call from paho's callback thread), this method is called by the user
-        and may block briefly while waiting for the drainer thread to exit.
-        That is acceptable here because stop() is not called from a callback.
-        """
+    def stop(self):
+        """Stop all background services and close the database."""
         self.logger.info("Shutting down client", client_id=self.client_id)
 
         self.reconnect_in_progress = False
-
-        # Signal the drainer to stop
         self._stop_drainer_event.set()
 
-        # Now we can safely join — stop() is not called from paho's thread
         if self.queue_drainer_thread and self.queue_drainer_thread.is_alive():
             self.queue_drainer_thread.join(timeout=5)
+
+        self._stop_health_check_server()
 
         self.client.loop_stop()
         self.inflight_tracker.close()
