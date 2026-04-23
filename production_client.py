@@ -152,31 +152,28 @@ class ProductionMQTTClient:
         self.current_backoff = self.min_backoff
         self.reconnect_in_progress = False
 
-        # ----------------------------------------------------------------
-        # Step 5: MQTT client and callbacks
-        # ----------------------------------------------------------------
+        # Step 5: Subscription registry
+        self._subscriptions     = {}
+        self._subscription_lock = threading.Lock()
+
+        # Step 6: MQTT client and callbacks
         self.client = mqtt.Client(client_id=client_id, clean_session=False)
         self.client.on_connect    = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_publish    = self._on_publish
+        self.client.on_message    = self._on_message
 
-        # ----------------------------------------------------------------
-        # Step 6: Queue drainer state (v0.5.0: threading.Event replaces
-        # the plain boolean + join pattern)
-        #
-        # _stop_drainer_event is the signal mechanism. The drainer thread
-        # waits on it with a timeout instead of sleeping unconditionally.
-        # When the event is set, the drainer wakes immediately and exits —
-        # regardless of how long it was planning to sleep.
-        #
-        # This means _stop_queue_drainer() can set the event and return
-        # immediately, without blocking the calling thread. That matters
-        # because _on_disconnect() runs on paho's network thread, and
-        # blocking that thread delays all further paho event processing.
-        # ----------------------------------------------------------------
+        # Step 7: Queue drainer state
         self.queue_drainer_running = False
         self.queue_drainer_thread  = None
         self._stop_drainer_event   = threading.Event()
+
+        # Step 8: Health check server state (v0.7.0)
+        # The server object and its thread are created in _start_health_check_server(),
+        # which is called from start(). They are not created here because __init__
+        # should not start background services — that is start()'s job.
+        self._health_check_server = None
+        self._health_check_thread = None
 
         self.logger.info(
             "Client initialised",
@@ -202,22 +199,23 @@ class ProductionMQTTClient:
         from the Config object automatically.
         """
         return cls(
-            client_id     = config.get("client_id"),
-            broker_host   = config.get("broker_host"),
-            broker_port   = config.get("broker_port"),
-            max_queue_size= config.get("max_queue_size"),
-            db_path       = config.get("db_path"),
-            min_backoff   = config.get("min_backoff"),
-            max_backoff   = config.get("max_backoff"),
-            log_dir       = config.get("log_dir"),
-            log_level     = config.get("log_level"),
-            # v0.5.0: TLS and authentication
-            use_tls       = config.get("use_tls"),
-            ca_certs      = config.get("ca_certs"),
-            certfile      = config.get("certfile"),
-            keyfile       = config.get("keyfile"),
-            username      = config.get("username"),
-            password      = config.get("password"),
+            client_id           = config.get("client_id"),
+            broker_host         = config.get("broker_host"),
+            broker_port         = config.get("broker_port"),
+            max_queue_size      = config.get("max_queue_size"),
+            db_path             = config.get("db_path"),
+            min_backoff         = config.get("min_backoff"),
+            max_backoff         = config.get("max_backoff"),
+            log_dir             = config.get("log_dir"),
+            log_level           = config.get("log_level"),
+            use_tls             = config.get("use_tls"),
+            ca_certs            = config.get("ca_certs"),
+            certfile            = config.get("certfile"),
+            keyfile             = config.get("keyfile"),
+            username            = config.get("username"),
+            password            = config.get("password"),
+            enable_health_check = config.get("enable_health_check"),
+            health_check_port   = config.get("health_check_port"),
         )
 
     # ------------------------------------------------------------------
