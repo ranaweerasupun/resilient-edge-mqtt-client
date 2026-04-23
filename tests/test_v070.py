@@ -89,6 +89,9 @@ client = ProductionMQTTClient.from_config(config)
 client.connect()
 client.start()   # <-- this is what starts the health check server
 
+time.sleep(2)
+
+
 # ── State 1: Healthy ──────────────────────────────────────────────────────────
 
 show_health("before publish")
