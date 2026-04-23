@@ -21,6 +21,8 @@ v0.7.0: Health check HTTP server.
           with the rest of the client lifecycle.
 """
 
+import http.server
+import json
 import sqlite3
 import logging
 import threading
@@ -43,10 +45,15 @@ _LOG_LEVEL_MAP = {
 }
 
 
+# Queue capacity thresholds for health status classification.
+# Below DEGRADED_THRESHOLD  → healthy.
+# At or above it             → degraded (still connected, but trending toward full).
+_DEGRADED_THRESHOLD = 80.0   # percent
+
 class ProductionMQTTClient:
     """
     MQTT client with offline queuing, inflight tracking, TLS, authentication,
-    and bidirectional communication via subscribe/unsubscribe.
+    and bidirectional communication via subscribe/unsubscribe. And an HTTP health check endpoint.
 
     Recommended instantiation:
 
@@ -59,6 +66,10 @@ class ProductionMQTTClient:
         client.subscribe("devices/my_device/commands/#", on_command)
         client.connect()
         client.start()
+
+    With health check enabled, GET http://localhost:8080/health returns a JSON
+    body describing the client's current state. The HTTP status code is 200 for
+    healthy/degraded and 503 for unhealthy (not connected to the broker).
     """
 
     def __init__(
@@ -80,6 +91,9 @@ class ProductionMQTTClient:
         # v0.5.0: Authentication parameters
         username=None,
         password=None,
+        # v0.7.0: health check parameters
+        enable_health_check=False,
+        health_check_port=8080,
     ):
         self.client_id   = client_id
         self.broker_host = broker_host
@@ -93,9 +107,11 @@ class ProductionMQTTClient:
         self.keyfile  = keyfile
         self.username = username
         self.password = password
+        self._enable_health_check = enable_health_check
+        self._health_check_port   = health_check_port
 
         # ----------------------------------------------------------------
-        # Step 1: Logger — must come first so everything below can log
+        # Step 1: Logger — added first so everything below can log
         # ----------------------------------------------------------------
         log_level_int = _LOG_LEVEL_MAP.get(log_level.upper(), logging.INFO)
         self.logger = get_logger(
@@ -168,6 +184,8 @@ class ProductionMQTTClient:
             broker=f"{broker_host}:{broker_port}",
             tls=use_tls,
             auth=username is not None,
+            health_check=enable_health_check,
+            health_check_port=health_check_port if enable_health_check else None,
         )
 
     # ------------------------------------------------------------------
