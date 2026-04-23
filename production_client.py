@@ -1,20 +1,24 @@
 """
 production_client.py — MQTT client with offline queuing, inflight tracking,
-TLS, authentication, and bidirectional communication.
+TLS, authentication, bidirectional communication, and a health check endpoint.
 
-v0.3.0: Fixed payload encoding corruption, resend-tracking gap, and publish() race condition.
-v0.4.0: Single shared database, Config integration via from_config(), logger integration.
-v0.5.0: TLS and authentication wired into connect(). threading.Event for queue drainer.
-v0.6.0: Subscribe support. The client is now fully bidirectional.
-        - subscribe(topic, callback, qos) registers a callback and immediately
-          subscribes if connected, or defers until the next connection.
-        - unsubscribe(topic) removes the callback and unsubscribes from the broker.
-        - _restore_subscriptions() is called from _on_connect() so subscriptions
-          survive reconnections transparently.
-        - _on_message() routes incoming messages to the correct callback using
-          MQTT wildcard matching (+ and #).
-        - _topic_matches() implements the full MQTT topic matching specification.
-        - get_statistics() now includes active_subscriptions count.
+v0.3.0: Fixed payload encoding corruption, resend-tracking gap, publish() race condition.
+v0.4.0: Single shared database, Config integration, logger integration.
+v0.5.0: TLS and authentication. threading.Event for queue drainer.
+v0.6.0: Subscribe support with wildcard matching and automatic restoration.
+v0.7.0: Health check HTTP server.
+        - A minimal HTTP server starts in a background daemon thread when
+          enable_health_check=True (set in config or constructor).
+        - GET /health returns a JSON body with three possible statuses:
+            "healthy"  (HTTP 200) — connected, queue below 80% capacity.
+            "degraded" (HTTP 200) — connected, but queue at 80%+ capacity.
+            "unhealthy"(HTTP 503) — not connected to the broker.
+        - The full get_statistics() snapshot is always included in the body
+          so monitoring tools have the context they need.
+        - Health check requests are logged at DEBUG level via the structured
+          logger rather than printed to stderr.
+        - The server is started in start() and stopped in stop(), consistent
+          with the rest of the client lifecycle.
 """
 
 import sqlite3
