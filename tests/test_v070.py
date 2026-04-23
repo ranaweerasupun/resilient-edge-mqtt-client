@@ -88,3 +88,46 @@ config = Config({
 client = ProductionMQTTClient.from_config(config)
 client.connect()
 client.start()   # <-- this is what starts the health check server
+
+# ── State 1: Healthy ──────────────────────────────────────────────────────────
+
+show_health("before publish")
+
+# ── State 2: Degraded ─────────────────────────────────────────────────────────
+
+
+# Temporarily disconnect so messages go to the offline queue
+client.is_connected = False
+for i in range(17):  # 17 of 20 = 85% — above the 80% threshold
+    client.publish(f"sensors/flood/{i}", f"reading_{i}".encode(), qos=1)
+client.is_connected = True
+
+show_health("queue at 85%")
+
+# Drain the queue for the next demonstration
+client.offline_queue.clear()
+time.sleep(0.5)
+
+
+# ── State 3: Unhealthy ───────────────────────────────────────────────────────
+
+client.is_connected = False
+show_health("simulated disconnect")
+
+# Restore for the polling demo
+client.is_connected = True
+time.sleep(0.5)
+
+
+# ── Section 4: Polling loop (what a monitoring script would do) ───────────────
+
+for i in range(5):
+    http_status, body = query_health()
+    status = body.get("status", "unknown")
+    q_pct  = body.get("statistics", {}).get("offline_queue", {}).get("capacity_used_percent", 0)
+    connected = body.get("statistics", {}).get("connected", False)
+    icon   = {"healthy": "✓", "degraded": "⚠", "unhealthy": "✗"}.get(status, "?")
+    print(f"  Poll {i+1}/5  HTTP {http_status}  {icon} {status:<10}  "
+          f"connected={connected}  queue={q_pct:.0f}%")
+    time.sleep(2)
+
