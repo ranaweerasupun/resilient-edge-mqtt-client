@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-test_v070.py — Simulation script for v0.7.0 (Observability)
+test_v070.py — Simulation script for v0.7.0(Observability)
 
 v0.7.0 added a health check HTTP endpoint so external systems — Docker,
 Kubernetes, Nagios, a simple cron job — can ask "is this client healthy?"
