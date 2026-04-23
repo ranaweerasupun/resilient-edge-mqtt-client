@@ -4,11 +4,11 @@ An MQTT client built for devices that live in the real world — Raspberry Pis, 
 
 ---
 
-## The Reason for Designing This ...
+## The Reason Behind for Designing This ...
 
 Standard MQTT clients assume the network is up. On an edge device, that assumption breaks regularly. Cellular links drop, Wi-Fi roams, VPNs time out, brokers restart. Most client libraries handle this by... not handling it. They hand the problem back to your application code and wish you luck.
 
-This library treats disconnection as a normal operating condition rather than an edge case. When the broker is unreachable, outgoing messages are written to a local SQLite queue and held there until the connection returns. Messages that were already sent but not yet acknowledged are tracked separately so they can be re-sent after reconnection. And as of v0.6.0, the client is fully bidirectional — you can subscribe to topics and receive messages just as reliably as you can publish them.
+This library treats disconnection as a normal operating condition rather than an edge case. When the broker is unreachable, outgoing messages are written to a local SQLite queue and held there until the connection returns. Messages that were already sent but not yet acknowledged are tracked separately so they can be re-sent after reconnection. And as of v0.6.0, the client is fully bidirectional — you can subscribe to topics and receive messages just as reliably as you can publish them.As of v0.7.0 it exposes an HTTP health check endpoint so external systems can observe its state without having to inspect log files or SSH into the device.
 
 ---
 
@@ -24,6 +24,7 @@ ProductionMQTTClient  (production_client.py)
       └── Config           (config.py)              — configuration from file/env/args
 
 ProductionLogger     (production_logger.py)         — rotating file logs + structured metrics
+HTTP Health Check    (built into production_client)  — GET /health over a background thread
 ```
 
 The client is the only thing your application talks to directly. `InflightTracker` and `OfflineQueue` are internal — the client decides which one to use based on the current connection state. You don't have to think about either of them.
@@ -48,15 +49,90 @@ The client is the only thing your application talks to directly. `InflightTracke
 
 **Flexible configuration** — `config.py` can load from a JSON file, a simple `key=value` file, environment variables, or a plain dictionary. Everything is validated at load time with clear error messages.
 
+**Subscribe support** — Register callbacks for incoming messages using full MQTT wildcard syntax. Subscriptions survive reconnections automatically.
+
+**Health check endpoint** — When `enable_health_check=True`, a minimal HTTP server runs on a background thread and exposes `GET /health`. The response body is a JSON snapshot of the client's current state. The HTTP status code is 200 when the client is healthy or degraded, and 503 when it is not connected to the broker.
+
 ---
 
-## Installation
+## Installation and Usage
 
 ```bash
 pip install -r requirements.txt
 ```
 
 SQLite3 is part of the Python standard library, so no separate install needed.
+
+### Basic usage with health check enabled
+
+```python
+from config import Config
+from production_client import ProductionMQTTClient
+
+config = Config({
+    "client_id":            "my_device_001",
+    "broker_host":          "localhost",
+    "broker_port":          1883,
+    "enable_health_check":  True,
+    "health_check_port":    8080,
+})
+
+client = ProductionMQTTClient.from_config(config)
+client.connect()
+client.start()
+
+# Health check is now available at http://localhost:8080/health
+```
+
+### Querying the health check
+
+```bash
+curl http://localhost:8080/health
+```
+
+A healthy response looks like this:
+
+```json
+{
+  "status": "healthy",
+  "client_id": "my_device_001",
+  "statistics": {
+    "connected": true,
+    "current_backoff_seconds": 1,
+    "offline_queue": {
+      "total_messages": 0,
+      "by_priority": {},
+      "oldest_message_age_seconds": null,
+      "capacity_used_percent": 0.0
+    },
+    "inflight_messages": 0,
+    "tls_enabled": false,
+    "active_subscriptions": 2
+  }
+}
+```
+
+A degraded response (connected but queue under pressure) returns HTTP 200 with `"status": "degraded"`. An unhealthy response (not connected) returns HTTP 503 with `"status": "unhealthy"`.
+
+### Docker HEALTHCHECK
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+```
+
+### Kubernetes liveness probe
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  failureThreshold: 3
+```
+
 
 ### Publishing only (no subscriptions)
 
@@ -206,6 +282,8 @@ It is better to gitignore the file so credentials stay out of version control. A
 | `log_dir` | `./logs` | Directory for log files |
 | `log_level` | `INFO` | One of: DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `db_path` | `./mqtt_client.db` | Path for the shared SQLite database |
+| `enable_health_check` | `false` | Enable the HTTP health check endpoint |
+| `health_check_port` | `8080` | Port for the health check endpoint |
 
 Configuration can also be loaded from environment variables prefixed with `MQTT_`:
 
@@ -288,6 +366,10 @@ sudo systemctl start mosquitto
 ---
 
 ## Changelog
+
+### v0.7.0 — Observability
+
+**Health check endpoint** — When `enable_health_check=True`, `start()` launches a minimal HTTP server on `health_check_port` in a background daemon thread. `GET /health` returns a JSON body with three possible statuses. `healthy` (HTTP 200) means connected to the broker and the offline queue is below 80% capacity. `degraded` (HTTP 200) means connected but the queue is at or above 80% — the client is functional but trending toward a problem. `unhealthy` (HTTP 503) means not connected to the broker at all. Healthy and degraded both return 200 because the process is alive and delivering messages; monitoring tools that need finer granularity can inspect the response body. The full `get_statistics()` snapshot is always included in the body. Health check requests are logged at DEBUG level through the structured logger rather than written to stderr. The server is stopped gracefully in `stop()`.
 
 ### v0.6.0 — Bidirectional Communication
 
