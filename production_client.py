@@ -218,6 +218,139 @@ class ProductionMQTTClient:
             health_check_port   = config.get("health_check_port"),
         )
 
+
+    # ------------------------------------------------------------------
+    # Health check server (v0.7.0)
+    # ------------------------------------------------------------------
+
+    def _start_health_check_server(self):
+        """
+        Start a minimal HTTP health check server in a background daemon thread.
+
+        The server responds to GET /health (and GET / as an alias) with a JSON
+        body and an HTTP status code that reflects the client's current state:
+
+          200 "healthy"   — connected to broker, queue below 80% capacity.
+          200 "degraded"  — connected, but queue at or above 80% capacity.
+                            The client is functional but trending toward full;
+                            investigate before it becomes a problem.
+          503 "unhealthy" — not connected to the broker.
+
+        Healthy and degraded both return HTTP 200 because the process is alive
+        and messages are still being accepted and delivered. Kubernetes liveness
+        probes, Docker HEALTHCHECK, and most load balancers only care whether
+        the status code is 2xx — they will treat both as "alive." Monitoring
+        tools that read the response body can distinguish between the two.
+
+        The handler class is defined inside this method so it can reference
+        `self` (the ProductionMQTTClient) through a closure without needing
+        to pass it as a constructor argument, which BaseHTTPRequestHandler's
+        interface does not easily support.
+        """
+        client = self  # capture reference for the handler closure
+
+        class _HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+
+            def do_GET(self):
+                # Only /health and / are valid paths.
+                if self.path not in ("/", "/health"):
+                    self._send_json(404, {"error": "not found", "hint": "use GET /health"})
+                    return
+
+                stats = client.get_statistics()
+
+                # Classify the health state based on connection and queue pressure.
+                connected     = stats["connected"]
+                queue_percent = stats["offline_queue"]["capacity_used_percent"]
+
+                if not connected:
+                    status    = "unhealthy"
+                    http_code = 503
+                elif queue_percent >= _DEGRADED_THRESHOLD:
+                    status    = "degraded"
+                    http_code = 200
+                else:
+                    status    = "healthy"
+                    http_code = 200
+
+                self._send_json(http_code, {
+                    "status":     status,
+                    "client_id":  client.client_id,
+                    "statistics": stats,
+                })
+
+            def _send_json(self, code, body_dict):
+                """Serialise body_dict to JSON and write the full HTTP response."""
+                body = json.dumps(body_dict, indent=2).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                """
+                Override the default handler to suppress stderr output and
+                route access logs through the structured logger instead.
+                """
+                client.logger.debug(
+                    "Health check request",
+                    method=self.command,
+                    path=self.path,
+                    remote=self.client_address[0],
+                )
+
+        try:
+            self._health_check_server = http.server.HTTPServer(
+                ("", self._health_check_port),
+                _HealthCheckHandler,
+            )
+        except OSError as e:
+            # The most common failure is EADDRINUSE — the port is already taken.
+            self.logger.error(
+                "Failed to start health check server — port may already be in use",
+                port=self._health_check_port,
+                error=str(e),
+            )
+            return
+
+        self._health_check_thread = threading.Thread(
+            target=self._health_check_server.serve_forever,
+            daemon=True,  # exits automatically when the main process exits
+            name="health-check-server",
+        )
+        self._health_check_thread.start()
+
+        self.logger.info(
+            "Health check server started",
+            port=self._health_check_port,
+            url=f"http://localhost:{self._health_check_port}/health",
+        )
+        self.logger.log_event(
+            "health_check_server_started",
+            port=self._health_check_port,
+        )
+
+    def _stop_health_check_server(self):
+        """
+        Stop the health check server gracefully.
+
+        shutdown() signals serve_forever() to exit on its next iteration and
+        blocks until it does. server_close() then releases the port. This order
+        is important — closing the port before shutdown() finishes can cause
+        a brief EADDRINUSE window if the process restarts quickly.
+        """
+        if self._health_check_server is None:
+            return
+
+        self._health_check_server.shutdown()    # waits for serve_forever() to exit
+        self._health_check_server.server_close() # releases the bound port
+        self._health_check_server = None
+        self.logger.info("Health check server stopped")
+
+
+
+
     # ------------------------------------------------------------------
     # MQTT callbacks
     # ------------------------------------------------------------------
@@ -247,6 +380,7 @@ class ProductionMQTTClient:
             self.reconnect_in_progress = False
 
             self._resend_inflight_messages()
+            self._restore_subscriptions()
             self._start_queue_drainer()
         else:
             self.logger.error("Connection refused by broker", return_code=rc)
