@@ -70,6 +70,7 @@ def show_health(label: str):
     print(f"    Queue: {q.get('total_messages', '?')} msgs ({q_pct:.1f}% full)")
     print(f"    Inflight: {inflight}   Subscriptions: {subs}")
 
+
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 section("Setup — Client with Health Check Enabled")
@@ -85,19 +86,38 @@ config = Config({
     "health_check_port":    HEALTH_CHECK_PORT,
 })
 
+print(f"Health check will be available at: http://localhost:{HEALTH_CHECK_PORT}/health")
+print(f"Max queue size set to 20 messages (so degraded is easy to trigger)\n")
+
 client = ProductionMQTTClient.from_config(config)
 client.connect()
 client.start()   # <-- this is what starts the health check server
 
+print("Waiting for connection and server startup...")
 time.sleep(2)
 
 
 # ── State 1: Healthy ──────────────────────────────────────────────────────────
 
+section("State 1 — HEALTHY (connected, queue empty)")
+
+print("The client is connected and has sent no offline messages.\n")
 show_health("before publish")
+
+print(f"\nYou can verify this yourself:")
+print(f"  curl http://localhost:{HEALTH_CHECK_PORT}/health")
+print(f"\nKubernetes would interpret HTTP 200 as 'liveness probe passed'.")
+print(f"Docker HEALTHCHECK would record this as 'healthy'.")
+
 
 # ── State 2: Degraded ─────────────────────────────────────────────────────────
 
+section("State 2 — DEGRADED (connected, queue under pressure)")
+
+print("Filling the queue to above 80% capacity while staying connected.")
+print("This simulates a device generating messages faster than they can be sent.")
+print("HTTP 200 is still returned — the client is alive — but 'degraded' warns")
+print("that the queue will fill completely if the condition persists.\n")
 
 # Temporarily disconnect so messages go to the offline queue
 client.is_connected = False
@@ -105,17 +125,32 @@ for i in range(17):  # 17 of 20 = 85% — above the 80% threshold
     client.publish(f"sensors/flood/{i}", f"reading_{i}".encode(), qos=1)
 client.is_connected = True
 
+time.sleep(0.3)
 show_health("queue at 85%")
+
+print(f"\nKubernetes would interpret HTTP 200 as 'alive'. An alert rule watching")
+print(f"the response body for status='degraded' would page the on-call engineer.")
 
 # Drain the queue for the next demonstration
 client.offline_queue.clear()
 time.sleep(0.5)
 
 
-# ── State 3: Unhealthy ───────────────────────────────────────────────────────
+# ── State 3: Unhealthy ────────────────────────────────────────────────────────
+
+section("State 3 — UNHEALTHY (not connected to broker)")
+
+print("Simulating a broker failure by setting is_connected=False.")
+print("HTTP 503 is returned — the client is running but cannot deliver messages.")
+print("Kubernetes would restart the pod; Docker would mark the container unhealthy.\n")
 
 client.is_connected = False
 show_health("simulated disconnect")
+
+print(f"\nIn practice, this state occurs when:")
+print(f"  - The broker is down or unreachable")
+print(f"  - The network between the device and broker has failed")
+print(f"  - TLS certificates have expired")
 
 # Restore for the polling demo
 client.is_connected = True
@@ -123,6 +158,12 @@ time.sleep(0.5)
 
 
 # ── Section 4: Polling loop (what a monitoring script would do) ───────────────
+
+section("4 — Polling Loop (10 seconds)")
+
+print("Polling /health every 2 seconds — this is what a monitoring script does.")
+print("The real value is that the endpoint works even when the device has no")
+print("shell access and no external log aggregation.\n")
 
 for i in range(5):
     http_status, body = query_health()
@@ -133,6 +174,7 @@ for i in range(5):
     print(f"  Poll {i+1}/5  HTTP {http_status}  {icon} {status:<10}  "
           f"connected={connected}  queue={q_pct:.0f}%")
     time.sleep(2)
+
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
