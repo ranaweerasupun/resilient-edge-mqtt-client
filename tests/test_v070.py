@@ -70,3 +70,21 @@ def show_health(label: str):
     print(f"    Queue: {q.get('total_messages', '?')} msgs ({q_pct:.1f}% full)")
     print(f"    Inflight: {inflight}   Subscriptions: {subs}")
 
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+section("Setup — Client with Health Check Enabled")
+
+config = Config({
+    "client_id":            "v070_health_demo",
+    "broker_host":          "localhost",
+    "broker_port":          1883,
+    "max_queue_size":       20,    # small queue so we can fill it quickly
+    "log_dir":              "/tmp/logs_v070",
+    "db_path":              "/tmp/v070_demo.db",
+    "enable_health_check":  True,
+    "health_check_port":    HEALTH_CHECK_PORT,
+})
+
+client = ProductionMQTTClient.from_config(config)
+client.connect()
+client.start()   # <-- this is what starts the health check server
