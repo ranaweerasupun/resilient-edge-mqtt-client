@@ -339,6 +339,27 @@ sudo systemctl start mosquitto
 
 ---
 
+## Running the tests
+
+```bash
+# Install test dependencies (separate from production deps)
+pip install -r dev-requirements.txt
+
+# Run all unit and component tests (no broker needed, ~4 seconds)
+pytest
+
+# Run with verbose output to see each test name
+pytest -v
+
+# Run integration tests (requires Mosquitto on localhost:1883)
+mosquitto -p 1883 &
+pytest -m integration -v
+```
+
+The test suite has 73 tests across 5 files. Integration tests are skipped automatically when no broker is detected. Running `pytest` without any flags runs everything except integration tests.
+
+---
+
 ## File reference
 
 `production_client.py` — The main entry point. Instantiate `ProductionMQTTClient`, call `.connect()` and `.start()`, then use `.publish()` for all outgoing messages. The client decides internally whether to send directly or queue offline.
