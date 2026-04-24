@@ -1,0 +1,8 @@
+# Development and testing dependencies.
+# Install with: pip install -r dev-requirements.txt
+#
+# Production dependencies are in requirements.txt (paho-mqtt only).
+# Keeping them separate means deployment environments do not need
+# pytest installed, and test environments do not influence production deps.
+
+pytest>=7.0

@@ -367,6 +367,10 @@ sudo systemctl start mosquitto
 
 ## Changelog
 
+### v0.8.0 — Test Coverage
+
+No source files changed. Added a pytest suite of 73 tests across 5 files: `test_offline_queue.py` (28 tests), `test_inflight_tracker.py` (12 tests), `test_topic_matching.py` (33 parametrized wildcard cases), `test_production_client.py` (16 tests with paho mocked, including health check server tests), and `test_integration.py` (3 end-to-end tests that run when Mosquitto is available). Added `pytest.ini`, `dev-requirements.txt`, and shared fixtures in `tests/conftest.py`. Writing the tests revealed that the queue eviction policy always succeeds (the fallback evicts the oldest message), correcting a mistaken mental model that was documented in the test itself.
+
 ### v0.7.0 — Observability
 
 **Health check endpoint** — When `enable_health_check=True`, `start()` launches a minimal HTTP server on `health_check_port` in a background daemon thread. `GET /health` returns a JSON body with three possible statuses. `healthy` (HTTP 200) means connected to the broker and the offline queue is below 80% capacity. `degraded` (HTTP 200) means connected but the queue is at or above 80% — the client is functional but trending toward a problem. `unhealthy` (HTTP 503) means not connected to the broker at all. Healthy and degraded both return 200 because the process is alive and delivering messages; monitoring tools that need finer granularity can inspect the response body. The full `get_statistics()` snapshot is always included in the body. Health check requests are logged at DEBUG level through the structured logger rather than written to stderr. The server is stopped gracefully in `stop()`.
