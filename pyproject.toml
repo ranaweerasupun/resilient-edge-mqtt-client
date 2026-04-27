@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "production-mqtt-client"
+version = "1.0.0"
+description = "A production-grade MQTT client for edge devices with offline queuing, inflight tracking, and reliable delivery"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {file = "LICENSE"}
+keywords = ["mqtt", "iot", "edge", "offline", "queue", "paho"]
+dependencies = [
+    "paho-mqtt",
+]
+
+[project.optional-dependencies]
+# Install dev dependencies with: pip install ".[dev]"
+# Or the traditional way:        pip install -r dev-requirements.txt
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools]
+# The library uses a flat layout — all modules live in the project root
+# rather than inside a subdirectory package. This lists them explicitly
+# so setuptools knows which .py files to include in the distribution.
+py-modules = [
+    "production_client",
+    "offline_queue",
+    "inflight_tracker",
+    "config",
+    "production_logger",
+]
+
+# -----------------------------------------------------------------------
+# pytest configuration (replaces pytest.ini from v0.8.0)
+# -----------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "integration: tests that require an external MQTT broker (run with: pytest -m integration)",
+]

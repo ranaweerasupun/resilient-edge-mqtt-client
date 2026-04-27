@@ -3,17 +3,17 @@ inflight_tracker.py — tracks MQTT messages that have been sent but not yet ack
 
 v0.3.0: Payload stored as BLOB (raw bytes) to prevent binary data corruption.
         Schema migration handles upgrade from TEXT-based v0.2.0 databases.
-
-v0.4.0: Accepts a shared SQLite connection and lock from ProductionMQTTClient,
-        so the inflight table and offline queue table live in a single database
-        file rather than two separate ones. Falls back to opening its own
-        connection if used in standalone mode (backward compatible).
+v0.4.0: Accepts a shared SQLite connection and lock from ProductionMQTTClient.
         All print() calls replaced with structured logger output.
+v1.0.0: Type hints added throughout.
 """
+
 
 import sqlite3
 import threading
 import time
+from typing import Any, Dict, List, Optional, Union
+
 from production_logger import get_logger
 
 
@@ -23,38 +23,30 @@ class InflightTracker:
 
     A message is "inflight" from the moment it is handed to the broker until
     the corresponding PUBACK (QoS 1) or PUBCOMP (QoS 2) is received. Storing
-    these in SQLite means they survive reconnections and process restarts, so
-    they can be re-sent rather than silently lost.
+    these in SQLite means they survive reconnections and process restarts.
     """
 
-    def __init__(self, db_path="mqtt_client.db", conn=None, lock=None):
+    def __init__(
+        self,
+        db_path: str = "mqtt_client.db",
+        conn: Optional[sqlite3.Connection] = None,
+        lock: Optional[threading.Lock] = None,
+    ) -> None:
         """
         Initialise the inflight tracker.
 
         If conn and lock are provided (as they are when called from
-        ProductionMQTTClient), the tracker uses the shared connection and lock
-        rather than creating its own. Both storage systems then read and write
-        to the same SQLite file, coordinated by the same lock.
-
-        If conn is not provided, the tracker opens its own connection to
-        db_path. This preserves backward compatibility for code that
-        instantiates InflightTracker directly outside of ProductionMQTTClient.
-
-        The _owns_connection flag records which mode we are in so that
-        close() knows whether to close the connection or leave it alone.
+        ProductionMQTTClient), the tracker uses the shared connection and lock.
+        If conn is not provided, the tracker opens its own connection to db_path,
+        preserving backward compatibility for standalone use.
         """
-        # Obtain the logger singleton. If ProductionMQTTClient created it
-        # first (as it should), we get the fully configured instance.
-        # If this class is used standalone, we get a default instance.
         self.logger = get_logger()
 
         if conn is not None:
-            # Shared mode — ProductionMQTTClient owns the connection lifecycle.
             self.conn = conn
-            self.lock = lock
+            self.lock = lock  # type: ignore[assignment]
             self._owns_connection = False
         else:
-            # Standalone mode — we own the connection and must close it.
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
             self.lock = threading.Lock()
             self._owns_connection = True
@@ -62,23 +54,17 @@ class InflightTracker:
         self._migrate_schema()
         self._create_table()
 
-    # ------------------------------------------------------------------
-    # Schema setup and migration
-    # ------------------------------------------------------------------
-
-    def _migrate_schema(self):
+    def _migrate_schema(self) -> None:
         """
         Detect and remove the old TEXT-based schema from v0.2.0 and earlier.
 
         The old schema stored payload as TEXT using str(payload), which
         corrupts binary data. Any data stored that way is unrecoverable,
         so the table is dropped and rebuilt with the correct BLOB column.
-        See the v0.3.0 release notes for a full explanation.
         """
         with self.lock:
             cursor = self.conn.cursor()
             cursor.execute("PRAGMA table_info(inflight_messages)")
-            # PRAGMA table_info returns rows: (cid, name, type, notnull, dflt, pk)
             columns = {row[1]: row[2].upper() for row in cursor.fetchall()}
 
             if "payload" in columns and columns["payload"] == "TEXT":
@@ -90,7 +76,7 @@ class InflightTracker:
                 cursor.execute("DROP TABLE inflight_messages")
                 self.conn.commit()
 
-    def _create_table(self):
+    def _create_table(self) -> None:
         """Create the inflight messages table with the correct BLOB schema."""
         with self.lock:
             cursor = self.conn.cursor()
@@ -106,12 +92,8 @@ class InflightTracker:
             """)
             self.conn.commit()
 
-    # ------------------------------------------------------------------
-    # Internal helper
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def _to_bytes(payload):
+    def _to_bytes(payload: Union[str, bytes]) -> bytes:
         """
         Ensure payload is bytes before storing.
 
@@ -122,11 +104,14 @@ class InflightTracker:
             return payload
         return payload.encode("utf-8")
 
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
-    def add_message(self, packet_id, topic, payload, qos, retain):
+    def add_message(
+        self,
+        packet_id: int,
+        topic: str,
+        payload: Union[str, bytes],
+        qos: int,
+        retain: bool,
+    ) -> None:
         """
         Store a message as inflight.
 
@@ -160,7 +145,7 @@ class InflightTracker:
             qos=qos,
         )
 
-    def remove_message(self, packet_id):
+    def remove_message(self, packet_id: int) -> None:
         """Remove a message once the broker has acknowledged it."""
         with self.lock:
             cursor = self.conn.cursor()
@@ -172,7 +157,7 @@ class InflightTracker:
 
         self.logger.debug("Removed inflight message", packet_id=packet_id)
 
-    def get_all_messages(self):
+    def get_all_messages(self) -> List[Dict[str, Any]]:
         """
         Return all stored inflight messages, ordered by timestamp.
 
@@ -190,13 +175,11 @@ class InflightTracker:
             )
             rows = cursor.fetchall()
 
-        # Build plain dicts from the row tuples. Index access works correctly
-        # whether the connection uses sqlite3.Row or the default tuple factory.
         return [
             {
                 "packet_id": row[0],
                 "topic":     row[1],
-                "payload":   row[2],     # bytes, ready to publish
+                "payload":   row[2],
                 "qos":       row[3],
                 "retain":    bool(row[4]),
                 "timestamp": row[5],
@@ -204,20 +187,19 @@ class InflightTracker:
             for row in rows
         ]
 
-    def count_messages(self):
+    def count_messages(self) -> int:
         """Return the number of messages currently awaiting acknowledgment."""
         with self.lock:
             cursor = self.conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM inflight_messages")
-            return cursor.fetchone()[0]
+            return int(cursor.fetchone()[0])
 
-    def close(self):
+    def close(self) -> None:
         """
         Close the database connection if we own it.
 
-        In shared connection mode (_owns_connection=False), the connection
-        is left open for ProductionMQTTClient to close in its stop() method.
-        In standalone mode, we close the connection we opened ourselves.
+        In shared connection mode, the connection is left open for
+        ProductionMQTTClient to close in its stop() method.
         """
         if self._owns_connection:
             with self.lock:
