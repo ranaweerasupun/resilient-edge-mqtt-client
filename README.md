@@ -1,5 +1,9 @@
 # Production MQTT Client for Edge Devices
 
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Python](https://img.shields.io/badge/python-3.7%2B-blue.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 An MQTT client built for devices that live in the real world — Raspberry Pis, industrial gateways, field sensors — where the network is unreliable and dropping a message silently is not acceptable.
 
 ---
@@ -59,9 +63,18 @@ The client is the only thing your application talks to directly. `InflightTracke
 
 ```bash
 pip install -r requirements.txt
+
+# With development/testing dependencies
+pip install ".[dev]"
+
+# Traditional approach (still works)
+pip install -r requirements.txt
 ```
 
+
 SQLite3 is part of the Python standard library, so no separate install needed.
+
+---
 
 ### Basic usage with health check enabled
 
