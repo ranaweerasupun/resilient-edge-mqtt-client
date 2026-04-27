@@ -22,8 +22,8 @@ import pytest
 import paho.mqtt.client as mqtt
 
 from conftest import broker_is_running
-from production_client import ProductionMQTTClient
-from config import Config
+from robmqtt.production_client import ProductionMQTTClient
+from robmqtt.config import Config
 
 
 # All tests in this file are skipped when no broker is running.

@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from inflight_tracker import InflightTracker
+from robmqtt.inflight_tracker import InflightTracker
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ import pytest
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from production_client import ProductionMQTTClient, _DEGRADED_THRESHOLD
+from robmqtt.production_client import ProductionMQTTClient, _DEGRADED_THRESHOLD
 
 
 def find_free_port():
@@ -29,7 +29,7 @@ def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
-from config import Config
+from robmqtt.config import Config
 
 
 # ---------------------------------------------------------------------------

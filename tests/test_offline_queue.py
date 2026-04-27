@@ -17,7 +17,7 @@ import threading
 
 import pytest
 
-from offline_queue import OfflineQueue
+from robmqtt.offline_queue import OfflineQueue
 
 
 # ---------------------------------------------------------------------------

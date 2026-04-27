@@ -17,7 +17,7 @@ with comments so the intent is explicit.
 
 import pytest
 
-from production_client import ProductionMQTTClient
+from robmqtt.production_client import ProductionMQTTClient
 
 # Alias for readability in the parametrize table
 matches = ProductionMQTTClient._topic_matches
