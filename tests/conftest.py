@@ -47,7 +47,7 @@ def configure_logger(tmp_path_factory):
     output. If a test genuinely fails, ERROR-level messages will still surface.
     """
     tmp_log_dir = tmp_path_factory.mktemp("mqtt_logs")
-    from production_logger import get_logger
+    from robmqtt.production_logger import get_logger
     get_logger(
         "mqtt_client",
         log_dir=str(tmp_log_dir),
