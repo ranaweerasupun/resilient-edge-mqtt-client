@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "production-mqtt-client"
+name = "robmqtt"
 version = "1.0.0"
-description = "A production-grade MQTT client for edge devices with offline queuing, inflight tracking, and reliable delivery"
+description = "A robust production-grade MQTT client for edge devices with offline queuing, inflight tracking, and reliable delivery"
 readme = "README.md"
 requires-python = ">=3.7"
 license = {file = "LICENSE"}
