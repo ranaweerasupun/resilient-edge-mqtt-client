@@ -22,16 +22,7 @@ dev = [
 ]
 
 [tool.setuptools]
-# The library uses a flat layout — all modules live in the project root
-# rather than inside a subdirectory package. This lists them explicitly
-# so setuptools knows which .py files to include in the distribution.
-py-modules = [
-    "production_client",
-    "offline_queue",
-    "inflight_tracker",
-    "config",
-    "production_logger",
-]
+packages = ["robmqtt"]
 
 # -----------------------------------------------------------------------
 # pytest configuration (replaces pytest.ini from v0.8.0)

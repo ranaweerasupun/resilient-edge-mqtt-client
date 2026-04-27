@@ -21,10 +21,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import paho.mqtt.client as mqtt
 
-from config import Config
-from inflight_tracker import InflightTracker
-from offline_queue import OfflineQueue
-from production_logger import get_logger
+from .config import Config
+from .inflight_tracker import InflightTracker
+from .offline_queue import OfflineQueue
+from .production_logger import get_logger
 
 
 _LOG_LEVEL_MAP: Dict[str, int] = {

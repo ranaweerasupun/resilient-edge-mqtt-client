@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Union
 
-from production_logger import get_logger
+from .production_logger import get_logger
 
 
 class InflightTracker:
