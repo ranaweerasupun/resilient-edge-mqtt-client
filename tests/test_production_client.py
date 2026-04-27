@@ -48,7 +48,7 @@ def mock_client(tmp_path):
     Using tmp_path ensures the SQLite database and log files go to a
     temporary directory that is cleaned up automatically after each test.
     """
-    with patch("production_client.mqtt.Client") as MockClass:
+    with patch("robmqtt.production_client.mqtt.Client") as MockClass:
         mock_paho = MagicMock()
         MockClass.return_value = mock_paho
 
@@ -260,7 +260,7 @@ def test_get_statistics_has_expected_keys(mock_client):
 
 def test_get_statistics_reflects_tls_setting(tmp_path):
     """tls_enabled in statistics must match the constructor parameter."""
-    with patch("production_client.mqtt.Client"):
+    with patch("robmqtt.production_client.mqtt.Client"):
         client = ProductionMQTTClient(
             client_id="tls_test",
             use_tls=True,
@@ -282,7 +282,7 @@ def health_check_client(tmp_path):
     free port. The server is started via start() and stopped via stop().
     """
     port = find_free_port()
-    with patch("production_client.mqtt.Client"):
+    with patch("robmqtt.production_client.mqtt.Client"):
         client = ProductionMQTTClient(
             client_id="hc_test",
             db_path=str(tmp_path / "test.db"),
