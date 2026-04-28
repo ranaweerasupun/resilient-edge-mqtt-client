@@ -11,13 +11,13 @@ authors = [
 ]
 readme = "README.md"
 requires-python = ">=3.7"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["mqtt", "iot", "edge", "offline", "queue", "paho"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -54,6 +54,9 @@ dev = [
 
 [tool.setuptools]
 packages = ["robmqtt"]
+
+[tool.setuptools.package-data]
+robmqtt = ["py.typed"]
 
 # -----------------------------------------------------------------------
 # pytest configuration (replaces pytest.ini from v0.8.0)
