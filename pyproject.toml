@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "robmqtt"
 version = "1.0.0"
 description = "A robust production-grade MQTT client for edge devices with offline queuing, inflight tracking, and reliable delivery"
+authors = [
+    { name = "Supun Sriyananda", email = "31850264+ranaweerasupun@users.noreply.github.com" }
+]
 readme = "README.md"
 requires-python = ">=3.7"
 license = {file = "LICENSE"}
