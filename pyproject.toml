@@ -14,8 +14,14 @@ requires-python = ">=3.7"
 license = {file = "LICENSE"}
 keywords = ["mqtt", "iot", "edge", "offline", "queue", "paho"]
 dependencies = [
-    "paho-mqtt",
+    "paho-mqtt>=1.6.1,<2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ranaweerasupun/resilient-edge-mqtt-client"
+Source = "https://github.com/ranaweerasupun/resilient-edge-mqtt-client"
+Issues = "https://github.com/ranaweerasupun/resilient-edge-mqtt-client/issues"
+Changelog = "https://github.com/ranaweerasupun/resilient-edge-mqtt-client/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # Install dev dependencies with: pip install ".[dev]"
