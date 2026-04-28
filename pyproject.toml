@@ -10,7 +10,7 @@ authors = [
     { name = "Supun Sriyananda", email = "31850264+ranaweerasupun@users.noreply.github.com" }
 ]
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["mqtt", "iot", "edge", "offline", "queue", "paho"]
@@ -22,12 +22,11 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Communications",
     "Topic :: Internet",
     "Topic :: Software Development :: Libraries :: Python Modules",
